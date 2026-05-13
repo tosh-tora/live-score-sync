@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from music21 import converter, stream, note, chord, meter, key, tempo
+from music21 import converter, stream, note, chord, meter, key, tempo, metadata
 
 
 # デフォルト設定
@@ -164,6 +164,21 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
     return variance ** 0.5  # 標準偏差
 
 
+def _build_tempo_map(score: stream.Score) -> dict[int, list]:
+    """全パートを走査して「小節番号 → テンポ要素リスト」のマップを作成する。
+    同一小節に複数パートでテンポが書かれている場合は最初に見つかったものを使う。
+    """
+    tempo_map: dict[int, list] = {}
+    for part in score.parts:
+        for m in part.getElementsByClass(stream.Measure):
+            if m.number is None or m.number in tempo_map:
+                continue
+            tempos = list(m.getElementsByClass(tempo.TempoIndication))
+            if tempos:
+                tempo_map[m.number] = tempos
+    return tempo_map
+
+
 def analyze_measure_activity(
     score: stream.Score,
     measure_number: int
@@ -249,6 +264,15 @@ def compress_score(
     # 新しいスコアを作成
     new_score = stream.Score()
 
+    # タイトルを「元のタイトル ガイド譜」に設定
+    original_title = (
+        score.metadata.title
+        if score.metadata and score.metadata.title
+        else Path(input_path).stem
+    )
+    new_score.metadata = metadata.Metadata()
+    new_score.metadata.title = f"{original_title} ガイド譜"
+
     # top_n 個の出力パートを作成
     output_parts = []
     for i in range(top_n):
@@ -256,6 +280,9 @@ def compress_score(
         new_part.partName = f"Guide {i + 1}"
         new_part.id = f"guide_{i + 1}"
         output_parts.append(new_part)
+
+    # 元スコアのテンポマップを構築（小節番号 → テンポ要素リスト）
+    tempo_map = _build_tempo_map(score)
 
     # 各小節を処理
     for m_num in measure_numbers:
@@ -293,6 +320,15 @@ def compress_score(
                         # 小節をディープコピーして追加
                         new_measure = copy.deepcopy(source_measure)
                         new_measure.number = m_num
+
+                        # テンポ処理: Guide 1 のみ元スコアのテンポを保持/挿入し、
+                        # それ以外のパートからはテンポ要素を除去（重複防止）
+                        for existing in list(new_measure.getElementsByClass(tempo.TempoIndication)):
+                            new_measure.remove(existing)
+                        if i == 0 and m_num in tempo_map:
+                            for t in tempo_map[m_num]:
+                                new_measure.insert(0, copy.deepcopy(t))
+
                         output_parts[i].append(new_measure)
                     else:
                         # 元パートに該当小節がない場合は休符小節を追加
