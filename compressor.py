@@ -17,11 +17,12 @@ Algorithmic MusicXML Compressor
 """
 
 import argparse
+import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from music21 import converter, stream, note, chord, meter, key, tempo
+from music21 import converter, stream, note, chord, meter, key, tempo, clef, instrument
 
 
 # デフォルト設定
@@ -164,6 +165,62 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
     return variance ** 0.5  # 標準偏差
 
 
+def _find_active_attribute(
+    source_part: stream.Part,
+    measure_number: int,
+    cls: type,
+):
+    """
+    source_part 内で measure_number 番目（含む）以前の小節を順に走査し、
+    最後に出現した cls 要素を返す。見つからなければ part 直下も探す。
+
+    music21 の getContextByClass() は measure 自体に含まれる要素を返さない
+    ケースがあるため、明示的に走査する。
+    """
+    found = None
+    for m in source_part.getElementsByClass(stream.Measure):
+        if m.number is None or m.number > measure_number:
+            continue
+        elements = list(m.getElementsByClass(cls))
+        if elements:
+            found = elements[-1]
+    if found is None:
+        part_level = list(source_part.getElementsByClass(cls))
+        if part_level:
+            found = part_level[0]
+    return found
+
+
+def _apply_source_attributes(
+    new_measure: stream.Measure,
+    source_part: stream.Part,
+    measure_number: int,
+) -> None:
+    """
+    元パートの楽器が切り替わった小節の先頭に、その小節時点で有効な
+    clef / keySignature / instrument を明示的に挿入する。
+
+    既存の同種要素は重複を避けるため一旦取り除いてから挿入する。
+    """
+    current_clef = _find_active_attribute(source_part, measure_number, clef.Clef)
+    current_key = _find_active_attribute(source_part, measure_number, key.KeySignature)
+    current_instrument = _find_active_attribute(source_part, measure_number, instrument.Instrument)
+
+    for existing in list(new_measure.getElementsByClass(clef.Clef)):
+        new_measure.remove(existing)
+    for existing in list(new_measure.getElementsByClass(key.KeySignature)):
+        new_measure.remove(existing)
+    for existing in list(new_measure.getElementsByClass(instrument.Instrument)):
+        new_measure.remove(existing)
+
+    if current_instrument is not None:
+        new_measure.insert(0, copy.deepcopy(current_instrument))
+    if current_key is not None:
+        new_measure.insert(0, copy.deepcopy(current_key))
+    if current_clef is not None:
+        new_measure.insert(0, copy.deepcopy(current_clef))
+
+
 def analyze_measure_activity(
     score: stream.Score,
     measure_number: int
@@ -219,8 +276,6 @@ def compress_score(
         weights: 重み設定 {"note_count", "rhythmic_resolution", "pitch_variance"}
         verbose: 詳細出力
     """
-    import copy
-
     if weights is None:
         weights = DEFAULT_CONFIG["weights"]
     print(f"Loading: {input_path}")
@@ -256,6 +311,9 @@ def compress_score(
         new_part.partName = f"Guide {i + 1}"
         new_part.id = f"guide_{i + 1}"
         output_parts.append(new_part)
+
+    # 各出力パートが直前に使用した元パートID（楽器切替を検知するため）
+    last_source_ids: list[str | None] = [None] * top_n
 
     # 各小節を処理
     for m_num in measure_numbers:
@@ -293,9 +351,15 @@ def compress_score(
                         # 小節をディープコピーして追加
                         new_measure = copy.deepcopy(source_measure)
                         new_measure.number = m_num
+                        # 元パート（楽器）が前回から切り替わった場合は
+                        # 新しい楽器の clef / keySignature / instrument を明示挿入する
+                        if last_source_ids[i] != source_part_id:
+                            _apply_source_attributes(new_measure, source_part, m_num)
                         output_parts[i].append(new_measure)
+                        last_source_ids[i] = source_part_id
                     else:
                         # 元パートに該当小節がない場合は休符小節を追加
+                        # （休符自体には楽器属性を付与しないため last_source_ids は更新しない）
                         rest_measure = stream.Measure(number=m_num)
                         rest_measure.append(note.Rest(quarterLength=4.0))
                         output_parts[i].append(rest_measure)
