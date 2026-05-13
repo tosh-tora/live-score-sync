@@ -1,0 +1,43 @@
+1. 汎用オーケストラ追従システム：製品仕様書
+【システム概要】
+本システムは、オーケストラの生演奏をマイクでリアルタイム解析し、MusicXML形式の楽譜と照合することで、指定された小節番号に到達した瞬間にPowerPointのスライドを自動制御する。
+
+【構成モジュール】
+① 汎用 MusicXML Compressor (Pre-processor)
+フルスコア（多段譜）から、Matchmakerの認識率を最大化するための「ガイド譜」を自動生成する。
+
+自動抽出アルゴリズム: 各小節をスキャンし、音符密度（Note Density）が高く、リズムの解像度が細かいパートを動的に選定する。
+
+情報の集約: 選定されたパートを単一のパート（またはピアノ譜形式）にマージし、軽量なMusicXMLとして書き出す。
+
+汎用性: 楽器名に依存せず、純粋に「音楽データの動き」から特徴的なパートを抽出する。
+
+② Sequential Live Follower (Main App)
+演奏追従: pymatchmaker (DTWアルゴリズム) を使用し、オーケストラのテンポの揺れを許容しながら現在地を特定。
+
+変拍子対応: partitura を用いてMusicXMLの構造を事前解析し、「累積拍数」から「楽譜上の小節番号」への正確な変換マップを保持する。
+
+楽順制御: N キー（Next）を押すことで、フォルダ内の次のスコアファイルと設定ファイルを順次ロードするシーケンシャル・ロード方式。
+
+アクション: JSON設定に基づき、pyautogui でキーボード信号（Right/Left）を送信。
+
+【データ構造】
+config.json (汎用設計)
+
+{
+  "settings": {
+    "cooldown_seconds": 3.0,
+    "confidence_threshold": 0.4
+  },
+  "movements": [
+    {
+      "id": 1,
+      "xml_file": "guide_mv1.xml",
+      "triggers": [
+        { "measure": 1, "action": "right", "note": "開始" },
+        { "measure": 45, "action": "right", "note": "テーマA" }
+      ]
+    }
+  ]
+}
+

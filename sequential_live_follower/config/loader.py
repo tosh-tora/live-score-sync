@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+config/loader.py - Configuration File Parser
+
+Loads config.json and provides access to movement definitions,
+trigger settings, and global parameters (cooldown, confidence threshold).
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Optional, List, Dict
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigLoader:
+    """
+    Parses and manages config.json.
+
+    Schema:
+    {
+      "settings": {
+        "cooldown_seconds": 3.0,
+        "confidence_threshold": 0.4
+      },
+      "movements": [
+        {
+          "id": 1,
+          "xml_file": "guide_mv1.xml",
+          "triggers": [
+            {"measure": 1, "action": "right", "note": "開始"},
+            {"measure": 45, "action": "right", "note": "テーマA"}
+          ]
+        }
+      ]
+    }
+    """
+
+    def __init__(self, config_path: str):
+        """
+        Load and parse config.json.
+
+        Args:
+            config_path: Path to config.json
+
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            json.JSONDecodeError: If config is invalid JSON
+        """
+        path = Path(config_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(path, 'r', encoding='utf-8') as f:
+            self.config = json.load(f)
+
+        # Extract sections
+        self.settings = self.config.get('settings', {})
+        self.movements = self.config.get('movements', [])
+        self.current_movement_idx = 0
+
+        logger.info(
+            f"Config loaded: {len(self.movements)} movements, "
+            f"cooldown={self.get_cooldown_seconds()}s, "
+            f"confidence_threshold={self.get_confidence_threshold()}"
+        )
+
+    def get_current_movement(self) -> Optional[Dict]:
+        """
+        Get current movement configuration.
+
+        Returns:
+            Movement dict, or None if at end
+        """
+        if self.current_movement_idx < len(self.movements):
+            return self.movements[self.current_movement_idx]
+        return None
+
+    def next_movement(self) -> bool:
+        """
+        Advance to next movement.
+
+        Returns:
+            True if successful, False if already at last movement
+        """
+        if self.current_movement_idx < len(self.movements) - 1:
+            self.current_movement_idx += 1
+            movement = self.get_current_movement()
+            logger.info(
+                f"Advanced to movement {self.current_movement_idx + 1}/{len(self.movements)}: "
+                f"{movement.get('xml_file', 'unknown')}"
+            )
+            return True
+        else:
+            logger.warning("Already at last movement")
+            return False
+
+    def previous_movement(self) -> bool:
+        """
+        Go back to previous movement.
+
+        Returns:
+            True if successful, False if already at first movement
+        """
+        if self.current_movement_idx > 0:
+            self.current_movement_idx -= 1
+            movement = self.get_current_movement()
+            logger.info(
+                f"Returned to movement {self.current_movement_idx + 1}/{len(self.movements)}: "
+                f"{movement.get('xml_file', 'unknown')}"
+            )
+            return True
+        else:
+            logger.warning("Already at first movement")
+            return False
+
+    def get_cooldown_seconds(self) -> float:
+        """Get trigger cooldown duration."""
+        return self.settings.get('cooldown_seconds', 3.0)
+
+    def get_confidence_threshold(self) -> float:
+        """Get confidence threshold for inertia activation."""
+        return self.settings.get('confidence_threshold', 0.4)
+
+    def get_movement_triggers(self, movement_id: Optional[int] = None) -> List[Dict]:
+        """
+        Get triggers for a movement.
+
+        Args:
+            movement_id: Movement ID (if None, use current)
+
+        Returns:
+            List of trigger dicts
+        """
+        if movement_id is None:
+            movement = self.get_current_movement()
+        else:
+            # Find movement by ID
+            movement = next(
+                (m for m in self.movements if m.get('id') == movement_id),
+                None
+            )
+
+        if movement:
+            triggers = movement.get('triggers', [])
+            # Sort by measure for convenience
+            return sorted(triggers, key=lambda t: t.get('measure', 0))
+        return []
+
+    def get_xml_file_for_movement(self, movement_idx: Optional[int] = None) -> Optional[str]:
+        """
+        Get XML file path for a movement.
+
+        Args:
+            movement_idx: Movement index (if None, use current)
+
+        Returns:
+            XML file path, or None if not found
+        """
+        if movement_idx is None:
+            movement = self.get_current_movement()
+        else:
+            if 0 <= movement_idx < len(self.movements):
+                movement = self.movements[movement_idx]
+            else:
+                return None
+
+        return movement.get('xml_file') if movement else None
+
+    def total_movements(self) -> int:
+        """Get total number of movements."""
+        return len(self.movements)
+
+    def current_movement_number(self) -> int:
+        """Get 1-indexed movement number."""
+        return self.current_movement_idx + 1
+
+    def __repr__(self) -> str:
+        return (
+            f"ConfigLoader("
+            f"movements={len(self.movements)}, "
+            f"current={self.current_movement_number()}/{self.total_movements()}, "
+            f"cooldown={self.get_cooldown_seconds()}s)"
+        )

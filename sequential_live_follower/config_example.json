@@ -1,0 +1,45 @@
+{
+  "settings": {
+    "cooldown_seconds": 3.0,
+    "confidence_threshold": 0.4
+  },
+  "movements": [
+    {
+      "id": 1,
+      "xml_file": "guide_mv1.xml",
+      "triggers": [
+        {
+          "measure": 1,
+          "action": "right",
+          "note": "Movement 1 - Start"
+        },
+        {
+          "measure": 45,
+          "action": "right",
+          "note": "Theme A"
+        },
+        {
+          "measure": 89,
+          "action": "right",
+          "note": "Coda"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "xml_file": "guide_mv2.xml",
+      "triggers": [
+        {
+          "measure": 1,
+          "action": "right",
+          "note": "Movement 2 - Start"
+        },
+        {
+          "measure": 67,
+          "action": "left",
+          "note": "Return to theme"
+        }
+      ]
+    }
+  ]
+}

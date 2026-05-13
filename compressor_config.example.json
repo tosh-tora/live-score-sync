@@ -1,0 +1,8 @@
+{
+  "weights": {
+    "note_count": 1.0,
+    "rhythmic_resolution": 3.0,
+    "pitch_variance": 0.5
+  },
+  "top_n": 4
+}

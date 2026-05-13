@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+ui/gui_tkinter.py - Real-Time Display GUI
+
+Tkinter-based GUI showing:
+- Current file name
+- Current measure (large)
+- Confidence score (color-coded)
+- Next trigger measure
+- Inertia mode indicator
+"""
+
+import logging
+import tkinter as tk
+from tkinter import font
+
+from sequential_live_follower.core.state_manager import AppState
+
+logger = logging.getLogger(__name__)
+
+
+class FollowerGUI:
+    """
+    Tkinter GUI for Sequential Live Follower.
+
+    Displays playback status in real-time without blocking.
+    """
+
+    def __init__(self, root: tk.Tk, state: AppState):
+        """
+        Initialize GUI.
+
+        Args:
+            root: tkinter root window
+            state: Shared AppState object
+        """
+        self.root = root
+        self.state = state
+
+        self.root.title("Sequential Live Follower")
+        self.root.geometry("900x500")
+        self.root.configure(bg="#f0f0f0")
+
+        # Create widgets
+        self._create_widgets()
+
+        # Start polling for state updates
+        self._poll_state()
+
+        logger.info("GUI initialized")
+
+    def _create_widgets(self):
+        """Create and layout tkinter widgets."""
+
+        # Title
+        title_font = font.Font(family="Arial", size=14, weight="bold")
+        title_label = tk.Label(
+            self.root, text="Sequential Live Follower", font=title_font, bg="#f0f0f0"
+        )
+        title_label.pack(pady=10)
+
+        # File name (large font)
+        file_font = font.Font(family="Arial", size=16, weight="bold")
+        self.label_file = tk.Label(
+            self.root, text="[No file loaded]", font=file_font, bg="#f0f0f0", fg="#333"
+        )
+        self.label_file.pack(pady=10)
+
+        # Current measure (very large)
+        measure_font = font.Font(family="Arial", size=72, weight="bold")
+        self.label_measure = tk.Label(
+            self.root,
+            text="--",
+            font=measure_font,
+            bg="#f0f0f0",
+            fg="blue"
+        )
+        self.label_measure.pack(pady=20)
+
+        # Confidence bar frame
+        conf_frame = tk.Frame(self.root, bg="#f0f0f0")
+        conf_frame.pack(pady=15)
+
+        conf_label = tk.Label(conf_frame, text="Confidence:", font=("Arial", 12), bg="#f0f0f0")
+        conf_label.pack(side=tk.LEFT, padx=10)
+
+        self.label_confidence = tk.Label(
+            conf_frame, text="-- (--)", font=("Arial", 12), bg="#f0f0f0", fg="gray"
+        )
+        self.label_confidence.pack(side=tk.LEFT, padx=10)
+
+        # Progress bar (simple visual representation)
+        self.canvas_confidence = tk.Canvas(
+            conf_frame, width=200, height=20, bg="white", highlightthickness=1
+        )
+        self.canvas_confidence.pack(side=tk.LEFT, padx=10)
+
+        # Next trigger measure
+        trigger_font = font.Font(family="Arial", size=14)
+        self.label_next_trigger = tk.Label(
+            self.root,
+            text="Next trigger: --",
+            font=trigger_font,
+            bg="#f0f0f0",
+            fg="#555"
+        )
+        self.label_next_trigger.pack(pady=5)
+
+        # Inertia mode indicator
+        self.label_inertia = tk.Label(
+            self.root, text="", font=("Arial", 12, "bold"), bg="#f0f0f0", fg="red"
+        )
+        self.label_inertia.pack(pady=5)
+
+        # Cooldown indicator
+        self.label_cooldown = tk.Label(
+            self.root, text="", font=("Arial", 11), bg="#f0f0f0", fg="orange"
+        )
+        self.label_cooldown.pack(pady=2)
+
+    def update_display(self):
+        """Update GUI with current state."""
+        try:
+            state = self.state.get_all()
+
+            # File name
+            filename = state['xml_file'] or "[No file]"
+            if isinstance(filename, str) and "/" in filename:
+                filename = filename.split("/")[-1]  # Show basename only
+            self.label_file.config(text=filename)
+
+            # Measure (large)
+            measure = state['measure']
+            self.label_measure.config(text=str(measure))
+
+            # Confidence with color coding
+            conf = state['confidence']
+            if conf > 0.6:
+                color = "green"
+            elif conf > 0.4:
+                color = "orange"
+            else:
+                color = "red"
+
+            self.label_confidence.config(
+                text=f"{conf:.2f} ({int(conf*100)}%)",
+                fg=color
+            )
+
+            # Confidence bar
+            self.canvas_confidence.delete("all")
+            bar_width = 200 * conf
+            self.canvas_confidence.create_rectangle(0, 0, bar_width, 20, fill=color, outline="black")
+
+            # Next trigger
+            next_trig = state['next_trigger_measure']
+            if next_trig:
+                self.label_next_trigger.config(text=f"Next trigger: {next_trig}")
+            else:
+                self.label_next_trigger.config(text="Next trigger: --")
+
+            # Inertia indicator
+            if state['inertia_mode']:
+                self.label_inertia.config(text="⚠ INERTIA MODE")
+            else:
+                self.label_inertia.config(text="")
+
+            # Cooldown indicator
+            if state['cooldown_active']:
+                self.label_cooldown.config(text="🔒 Cooldown active")
+            else:
+                self.label_cooldown.config(text="")
+
+        except Exception as e:
+            logger.error(f"GUI update error: {e}")
+
+    def _poll_state(self):
+        """Poll state for updates every 100ms."""
+        try:
+            self.update_display()
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+
+        # Schedule next poll
+        self.root.after(100, self._poll_state)
+
+    def on_closing(self):
+        """Handle window close event."""
+        logger.info("GUI closing")
+        self.root.destroy()
