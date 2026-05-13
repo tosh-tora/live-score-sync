@@ -104,6 +104,7 @@ class PartActivity:
     note_count: int           # 音符数
     rhythmic_resolution: float  # リズム解像度（最小音価の逆数）
     pitch_variance: float      # 音高の分散（メロディ的動き）
+    is_percussion: bool = False  # 打楽器パート（マッチング除外優先）
 
     def calculate_score(self, weights: dict) -> float:
         """
@@ -221,6 +222,17 @@ def _apply_source_attributes(
         new_measure.insert(0, copy.deepcopy(current_clef))
 
 
+def _is_percussion_part(part: stream.Part) -> bool:
+    """パートが音程のない打楽器パートかどうかを判定する。
+    instrument クラスによる判定を優先し、フォールバックとして PercussionClef を確認する。
+    """
+    instr = part.getInstrument()
+    if isinstance(instr, instrument.UnpitchedPercussion):
+        return True
+    first_clef = part.recurse().getElementsByClass(clef.Clef).first()
+    return isinstance(first_clef, clef.PercussionClef)
+
+
 def analyze_measure_activity(
     score: stream.Score,
     measure_number: int
@@ -231,6 +243,7 @@ def analyze_measure_activity(
     for part in score.parts:
         part_id = part.id or "unknown"
         part_name = part.partName or part_id
+        is_perc = _is_percussion_part(part)
 
         # 該当小節を取得
         measure = part.measure(measure_number)
@@ -251,7 +264,8 @@ def analyze_measure_activity(
             part_name=part_name,
             note_count=note_count,
             rhythmic_resolution=rhythmic_res,
-            pitch_variance=pitch_var
+            pitch_variance=pitch_var,
+            is_percussion=is_perc,
         ))
 
     return activities
@@ -324,13 +338,23 @@ def compress_score(
         activities.sort(key=lambda x: x.calculate_score(weights), reverse=True)
 
         # 上位N個を選定（活動があるパートのみ）
+        # 原則: 非打楽器を優先。非打楽器が不足する場合のみ打楽器で補完。
+        # 例外: 非打楽器が1つもアクティブでない小節は打楽器を使用。
         active_parts = [a for a in activities if a.note_count > 0]
-        selected = active_parts[:top_n]
+        non_perc = [a for a in active_parts if not a.is_percussion]
+        perc = [a for a in active_parts if a.is_percussion]
+        if non_perc:
+            selected = non_perc[:top_n]
+            if len(selected) < top_n:
+                selected += perc[:top_n - len(selected)]
+        else:
+            selected = perc[:top_n]
 
         if verbose and m_num <= 5:  # 最初の5小節だけ詳細表示
             print(f"\n小節 {m_num}:")
             for a in selected:
-                print(f"  {a.part_name}: score={a.calculate_score(weights):.1f} "
+                perc_mark = " [perc]" if a.is_percussion else ""
+                print(f"  {a.part_name}{perc_mark}: score={a.calculate_score(weights):.1f} "
                       f"(notes={a.note_count}, res={a.rhythmic_resolution:.1f}, "
                       f"var={a.pitch_variance:.1f})")
 
