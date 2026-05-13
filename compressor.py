@@ -199,13 +199,15 @@ def _apply_source_attributes(
 ) -> None:
     """
     元パートの楽器が切り替わった小節の先頭に、その小節時点で有効な
-    clef / keySignature / instrument を明示的に挿入する。
+    clef / keySignature を明示的に挿入する。
+
+    instrument は挿入しない。移調楽器の transposition 情報が残ると
+    toSoundingPitch() 済みの音符が再度移調されて出力されてしまうため。
 
     既存の同種要素は重複を避けるため一旦取り除いてから挿入する。
     """
     current_clef = _find_active_attribute(source_part, measure_number, clef.Clef)
     current_key = _find_active_attribute(source_part, measure_number, key.KeySignature)
-    current_instrument = _find_active_attribute(source_part, measure_number, instrument.Instrument)
 
     for existing in list(new_measure.getElementsByClass(clef.Clef)):
         new_measure.remove(existing)
@@ -214,8 +216,6 @@ def _apply_source_attributes(
     for existing in list(new_measure.getElementsByClass(instrument.Instrument)):
         new_measure.remove(existing)
 
-    if current_instrument is not None:
-        new_measure.insert(0, copy.deepcopy(current_instrument))
     if current_key is not None:
         new_measure.insert(0, copy.deepcopy(current_key))
     if current_clef is not None:
@@ -294,6 +294,7 @@ def compress_score(
         weights = DEFAULT_CONFIG["weights"]
     print(f"Loading: {input_path}")
     score = converter.parse(input_path)
+    score = score.toSoundingPitch()  # 移調楽器を実音（concert pitch）に統一
 
     # パート一覧を表示
     parts_info = list_parts(score)
@@ -319,11 +320,16 @@ def compress_score(
     new_score = stream.Score()
 
     # top_n 個の出力パートを作成
+    # 移調なしの汎用楽器を設定する（toSoundingPitch() 済みの concert pitch が
+    # 書き出し時に再移調されないようにするため）
     output_parts = []
     for i in range(top_n):
         new_part = stream.Part()
         new_part.partName = f"Guide {i + 1}"
         new_part.id = f"guide_{i + 1}"
+        generic_instrument = instrument.Instrument()
+        generic_instrument.transposition = None
+        new_part.insert(0, generic_instrument)
         output_parts.append(new_part)
 
     # 各出力パートが直前に使用した元パートID（楽器切替を検知するため）
