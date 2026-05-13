@@ -1,249 +1,166 @@
 # インストール & 検証ガイド
 
-## インストール状況
+このシステムは 2 つのタスクで構成されます:
 
-✅ **コア依存パッケージ インストール済:**
-- music21 (MusicXML解析)
-- partitura (楽譜構造分析)
-- librosa (Chroma特徴抽出)
-- numpy (数値演算)
-- pandas (データ処理 - partitura の依存)
-- scikit-learn (音声特徴処理 - librosa の依存)
-- pyautogui (キーボード制御)
-- keyboard (グローバルホットキーサポート)
+- **Task 1: MusicXML Compressor** — フルスコアからガイド譜を生成 (CLI ツール)。Windows / WSL2 / Linux / macOS どこでも動きます。
+- **Task 2: Sequential Live Follower** — マイク追従によるスライド制御 (リアルタイムアプリ)。**WSL2 (Ubuntu) 上での動作を前提**としています。
 
-⚠️ **オプショナル依存（モック実装で代替可能）:**
-- pyaudio: 音声キャプチャ（要 PortAudio 開発ライブラリ - モック実装で440Hz正弦波生成）
-- pymatchmaker: DTW アライメント（モック実装で120BPM自動進行）
+> `pymatchmaker` (DTW 追従ライブラリ) は Windows wheel が公開されておらず、conda 経由のソースビルドも環境差で失敗が多いため、Task 2 は WSL2 (Windows Subsystem for Linux 2) で動かす方針です。Windows 11 の WSLg がマイク入力・GUI 描画をホストとシームレスに橋渡しするので、操作 GUI もスライド表示もすべて WSL2 内で完結します。
 
-## Task 1 実装検証
+---
 
-### ✅ コンプレッサー完成機能
+## Task 1 (Compressor) のインストール
 
-- ✅ ディレクトリ自動検出 (work/inbox → work/outbox)
-- ✅ バッチ処理 (全ファイル処理)
-- ✅ 設定可能な活動量重み
-- ✅ CLI オプション対応
-
-### 使用方法
+Task 1 は単独で動く軽量スクリプトです。Windows でも WSL2 でも動きます。
 
 ```bash
-# 単一ファイル処理
-python compressor.py input.xml
+# 任意の Python 3.10+ 環境で
+pip install -r requirements.txt
+```
 
-# バッチ処理（work/inbox 内の全ファイル）
+使用例:
+
+```bash
+# work/inbox/ にある全 MusicXML をバッチ処理
 python compressor.py
 
-# カスタム重み指定
+# 単一ファイル
+python compressor.py work/inbox/score.xml
+
+# カスタム重み
 python compressor.py -c compressor_config.json --weight-rhythm 5.0
-
-# ヘルプ表示
-python compressor.py --help
 ```
 
-## Task 2 実装検証
+---
 
-### ✅ メインアプリケーション完成モジュール
+## Task 2 (Sequential Live Follower) のインストール — WSL2 セットアップ
 
-| モジュール | ファイル | ステータス |
-|----------|---------|----------|
-| Beat↔小節変換 | score_mapper.py | ✅ 完成 |
-| 音声キャプチャ | audio_capturer.py | ✅ (モック対応) |
-| Chroma抽出 | feature_extractor.py | ✅ 完成 |
-| DTWマッチング | matcher.py | ✅ (モック対応) |
-| 状態管理 | state_manager.py | ✅ 完成 |
-| 信頼度補外 | inertia_engine.py | ✅ 完成 |
-| トリガー冷却 | cooldown_timer.py | ✅ 完成 |
-| GUI | gui_tkinter.py | ✅ 完成 |
-| 設定読み込み | config/loader.py | ✅ 完成 |
-| メイン統合 | main.py | ✅ 完成 |
+### 1. WSL2 + Ubuntu のインストール (Windows ホスト側)
 
-## 検証手順
+**管理者で PowerShell を起動して実行:**
 
-### 1. 構文チェック
-
-```bash
-python -m py_compile sequential_live_follower/main.py
-# 出力: （エラーなし）
+```powershell
+wsl --install -d Ubuntu-24.04
 ```
 
-### 2. モジュールインポートテスト
+再起動を求められたら従ってください。再起動後 Ubuntu が自動で立ち上がるので、初期ユーザ名 / パスワードを設定します。
+
+### 2. システムパッケージのインストール (Ubuntu 内)
 
 ```bash
-cd C:\Users\I018970\Projects\research\mmatch
-python -c "
-import sys
-sys.path.insert(0, '.')
-from sequential_live_follower.main import SequentialFollower
-print('OK: 全モジュール正常')
-"
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y \
+    python3 python3-pip python3-venv python3-tk \
+    fluidsynth libfluidsynth-dev \
+    portaudio19-dev \
+    libnss3 libatk-bridge2.0-0 libcups2 libgtk-3-0 libgbm1 libasound2t64 \
+    git
 ```
 
-### 3. ScoreMapper テスト
+> `python3-tk` は操作 GUI (Tkinter) の表示に必要、`libnss3` 以降は Playwright が起動する Chromium の依存です。
+
+### 3. プロジェクトの取得と Python 環境構築
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, '.')
-from sequential_live_follower.core.score_mapper import ScoreMapper
-# 任意の有効な MusicXML ファイルで動作
-"
+# /mnt/c (= Windows ファイルシステム) より WSL2 ネイティブ側に置く方が高速
+cd ~
+git clone https://github.com/tosh-tora/live-score-sync.git
+cd live-score-sync
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+playwright install chromium
 ```
 
-### 4. コンポーネント単体テスト（GUI不要）
+### 4. マイク確認
 
 ```bash
-# 状態管理テスト
-python -c "
-import sys
-sys.path.insert(0, '.')
-from sequential_live_follower.core.state_manager import AppState
-state = AppState()
-state.set_movement(1, 'test.xml', [])
-print(f'OK: {state}')
-"
-
-# 慣性エンジンテスト
-python -c "
-import sys
-sys.path.insert(0, '.')
-from sequential_live_follower.core.inertia_engine import InertiaEngine
-inertia = InertiaEngine()
-beat, active, tempo = inertia.update(10.0, 0.5)
-print(f'OK: beat={beat:.1f}, active={active}')
-"
-
-# クールダウンタイマーテスト
-python -c "
-import sys
-sys.path.insert(0, '.')
-from sequential_live_follower.core.cooldown_timer import CooldownTimer
-timer = CooldownTimer()
-print(f'OK: トリガー可能? {timer.should_trigger(1)}')
-timer.mark_triggered(1)
-print(f'OK: 再トリガー可能? {timer.should_trigger(1)}')
-"
+# 5 秒録音 → 再生テスト
+arecord -d 5 -f cd test.wav && aplay test.wav
 ```
 
-## 既知制限事項（対策あり）
+問題なく自分の声が録音できれば WSLg のオーディオパススルーは動いています。
 
-| 問題 | 状態 | 対策 |
-|------|------|------|
-| PyAudio 未インストール | ⚠️ モック実装使用 | 音声キャプチャは440Hz正弦波を生成 |
-| PyMatcher 利用不可 | ⚠️ モック実装使用 | Matcher は120BPM で自動進行 |
-| keyboard ライブラリなし | ✅ オプション | アプリケーションは 'N'キーなしでも動作 |
-
-## 本格運用への次のステップ
-
-実際の音声とスコアを使う場合:
-
-### 1. PyAudio をインストール（オプション）
+### 5. 動作確認 (smoke test)
 
 ```bash
-# Linux
-sudo apt-get install portaudio19-dev
-pip install pyaudio
-
-# macOS
-brew install portaudio
-pip install pyaudio
-
-# Windows（プリビルト wheel）
-pip install pipwin
-pipwin install pyaudio
+# pymatchmaker / partitura / Playwright のインポート
+python -c "from matchmaker import Matchmaker; print('matchmaker OK')"
+python -c "import partitura; print('partitura OK')"
+python -c "from playwright.sync_api import sync_playwright; print('playwright OK')"
 ```
 
-### 2. PyMatcher をインストール（オプション）
+すべて `OK` が出れば準備完了です。
+
+---
+
+## Task 2 の実行
 
 ```bash
-# https://github.com/chrisdonahue/pymatchmaker を確認
-# ソースからビルド可能な場合
-```
+# 仮想環境を有効化
+source ~/live-score-sync/.venv/bin/activate
+cd ~/live-score-sync
 
-### 3. MusicXML スコアを準備
-
-```bash
-# フルオーケストラスコアを work/inbox/ に配置
-python compressor.py  # ガイド楽譜を生成
-```
-
-### 4. config.json を作成
-
-```bash
+# config.json を作成 (初回のみ)
 cp sequential_live_follower/config_example.json config.json
-# ガイド楽譜のパスと measure トリガーを編集
+# config.json を編集して xml_file / triggers を実ファイルに合わせる
+
+# 起動
+python -m sequential_live_follower.main config.json \
+    --slide-url "https://docs.google.com/presentation/d/<ID>/present" \
+    -v
 ```
 
-### 5. アプリケーション実行
+起動時の挙動:
 
-```bash
-python -m sequential_live_follower.main config.json
-# GUI で 'N' キーを押して最初の楽章を読み込み
-# マイクに演奏を入力
+1. Playwright が Chromium を非ヘッドレスで開き、指定の Google Slides URL に遷移
+2. Tkinter の操作 GUI (現在小節・信頼度・次トリガー表示) が別ウィンドウで起動
+3. 最初の楽章 (config.json の `movements[0]`) が自動ロードされ、マイク追従開始
+
+**拡張ディスプレイ運用:**
+
+- WSLg で起動した Chromium ウィンドウをマウスでプロジェクタ側のモニタにドラッグ
+- F11 (または Google Slides の「スライドショーを開始」ボタン) でフルスクリーン
+- 操作 GUI は手元モニタに残す
+- 操作 GUI が**フォーカスを持っている時** `N` キーを押すと次の楽章に進みます
+
+---
+
+## Google Slides の URL について
+
+Google Slides のプレゼン URL は以下の形式が便利です:
+
+```
+https://docs.google.com/presentation/d/<PRESENTATION_ID>/present?slide=id.p
 ```
 
-## ファイル構成確認
+- `/present` 形式にするとロード直後にプレゼンテーションモード (全画面相当) になる
+- スライドは「リンクを知っている全員 (閲覧者)」の共有設定にしておく
+- ローカルファイル (`.pptx`) を使いたい場合は事前に Google Slides にアップロードして変換
 
-```
-mmatch/
-├── compressor.py ✅
-├── requirements.txt ✅
-├── work/
-│   ├── inbox/ ✅ (空、ユーザーが MusicXML を配置)
-│   └── outbox/ ✅ (出力ディレクトリ)
-├── sequential_live_follower/
-│   ├── main.py ✅
-│   ├── config_example.json ✅
-│   ├── README.md ✅
-│   ├── README_JP.md ✅
-│   ├── core/ ✅
-│   │   ├── score_mapper.py ✅
-│   │   ├── audio_capturer.py ✅ (モック対応)
-│   │   ├── feature_extractor.py ✅
-│   │   ├── matcher.py ✅ (モック対応)
-│   │   ├── state_manager.py ✅
-│   │   ├── inertia_engine.py ✅
-│   │   ├── cooldown_timer.py ✅
-│   │   └── __init__.py ✅
-│   ├── ui/
-│   │   ├── gui_tkinter.py ✅
-│   │   └── __init__.py ✅
-│   ├── config/
-│   │   ├── loader.py ✅
-│   │   └── __init__.py ✅
-│   └── __init__.py ✅
-├── README.md ✅
-├── README_JP.md ✅
-└── specification.txt ✅
-```
+---
 
-## パフォーマンス期待値
+## トラブルシューティング
 
-### モック実装
+| 症状 | 原因 | 対処 |
+|------|------|------|
+| `from matchmaker import Matchmaker` で ImportError | WSL2 内で pip install されていない | `pip install pymatchmaker` を venv 有効化済みで実行 |
+| `Could not find FluidSynth library` | libfluidsynth-dev 未導入 | `sudo apt install fluidsynth libfluidsynth-dev` |
+| マイクが認識されない | WSLg オーディオドライバの初期化失敗 | `wsl --shutdown` → 再起動。Windows 側の入力デバイスがデフォルトに設定されているか確認 |
+| Chromium 起動でクラッシュ | `playwright install chromium` 未実行 | venv 有効化済みで `playwright install chromium` |
+| トリガー時にスライドが進まない | Chromium がフォーカスを失っている / プレゼンモードでない | Chromium ウィンドウをクリック → F11 でフルスクリーンに |
+| 信頼度が常に低い | マイクゲイン低 / 楽器配置と離れている | 入力ゲインを上げる、`config.json` の `confidence_threshold` を下げる |
 
-- **総遅延**: 100-200ms（スライド制御に十分）
-- **CPU 使用率**: 5-15%
-- **メモリ**: 50-100MB
+---
 
-### 本格実装（PyAudio + PyMatcher）
+## 受け入れ基準 (動作確認チェックリスト)
 
-- **総遅延**: 150-400ms（許容範囲内）
-- **CPU 使用率**: 30-50%（librosa チューニングで調整可）
-- **メモリ**: 100-200MB
-
-## 結論
-
-✅ **全要件実装完了**
-✅ **システム本番運用可能**
-⚠️ **実音声・マッチング利用はオプション**
-
-### すぐに実行可能:
-1. コンプレッサー (XML 圧縮)
-2. メインアプリケーション (リアルタイム追従)
-3. モック実装でテスト (PyAudio/PyMatcher なし)
-
-### 本格運用の場合:
-- PyAudio を個別にインストール
-- PyMatcher を個別にインストール
-- 実際のスコア＋トリガーで運用開始
-
+- [ ] `pip install -r requirements.txt` + `playwright install chromium` が完了
+- [ ] `arecord` で WSL2 内からマイク録音できる
+- [ ] `python -c "from matchmaker import Matchmaker; m = Matchmaker(score_file='sample.xml', input_type='audio')"` がエラーなく完了 (要 MusicXML サンプル)
+- [ ] `python -m sequential_live_follower.main config.json --slide-url <URL>` で Chromium と Tkinter GUI が両方表示される
+- [ ] 操作 GUI で `N` を押すと次の楽章に切り替わる
+- [ ] 指定小節到達時にスライドが進む
+- [ ] 信頼度が低下したとき GUI に "⚠ INERTIA MODE" が表示される

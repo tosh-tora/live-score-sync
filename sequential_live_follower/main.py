@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-main.py - Sequential Live Follower Main Application
+main.py - Sequential Live Follower Entry Point
 
-Orchestrates all threads and components:
-- Audio capture (background thread)
-- Feature extraction (background thread)
-- Matching engine (background thread)
-- Trigger execution (background thread)
-- GUI (main thread, tkinter loop)
-- Keyboard listener (global 'N' key for next movement)
+Components running in the process:
 
-Usage:
-    python -m sequential_live_follower.main config.json
+  Main thread
+    └─ Tkinter GUI (operator screen)
+
+  Worker threads (daemon)
+    ├─ matchmaker-worker    (MatchMaker — owns Matchmaker.run() generator)
+    ├─ slide-controller     (SlideController — owns Playwright Chromium)
+    ├─ state-sync           (polls MatchMaker, updates AppState)
+    └─ trigger-executor     (watches AppState, fires slide presses)
+
+Usage::
+
+    python -m sequential_live_follower.main config.json \\
+        --slide-url "https://docs.google.com/presentation/d/<ID>/present"
+
+Press the 'N' key (global hotkey on supported platforms) to advance to the
+next movement listed in config.json.
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -21,445 +31,333 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from queue import Queue, Empty
 
-try:
-    import keyboard
-except ImportError:
-    keyboard = None
-
-from sequential_live_follower.core.audio_capturer import AudioCapturer
-from sequential_live_follower.core.feature_extractor import FeatureExtractor
+from sequential_live_follower.config.loader import ConfigLoader
+from sequential_live_follower.core.cooldown_timer import CooldownTimer
+from sequential_live_follower.core.inertia_engine import InertiaEngine
 from sequential_live_follower.core.matcher import MatchMaker
 from sequential_live_follower.core.score_mapper import ScoreMapper
+from sequential_live_follower.core.slide_controller import SlideController
 from sequential_live_follower.core.state_manager import AppState
-from sequential_live_follower.core.inertia_engine import InertiaEngine
-from sequential_live_follower.core.cooldown_timer import CooldownTimer
-from sequential_live_follower.config.loader import ConfigLoader
 from sequential_live_follower.ui.gui_tkinter import FollowerGUI
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-)
 logger = logging.getLogger(__name__)
+
+# How often we poll the matcher for an updated beat. Matchmaker yields at the
+# audio frame rate (typically 10-50 Hz); polling at 20 Hz is plenty.
+_STATE_SYNC_HZ = 20
+# How often the trigger executor checks for measure hits.
+_TRIGGER_POLL_HZ = 20
 
 
 class SequentialFollower:
-    """
-    Main application orchestrator.
+    """Top-level application orchestrator."""
 
-    Manages all worker threads, state, and UI.
-    """
+    def __init__(self, config_path: str, slide_url: str) -> None:
+        logger.info("Initializing SequentialFollower (config=%s)", config_path)
 
-    def __init__(self, config_path: str):
-        """
-        Initialize application.
-
-        Args:
-            config_path: Path to config.json
-        """
-        logger.info(f"Initializing SequentialFollower with {config_path}")
-
-        # Load configuration
         self.config = ConfigLoader(config_path)
+        self.slide_url = slide_url
 
-        # Central state
+        # Shared state and per-instance helpers
         self.state = AppState()
-
-        # Worker threads (initially None)
-        self.audio_worker: threading.Thread | None = None
-        self.feature_worker: threading.Thread | None = None
-        self.matcher_worker: threading.Thread | None = None
-        self.trigger_worker: threading.Thread | None = None
-
-        # Thread-safe queues
-        self.audio_queue = Queue(maxsize=10)
-        self.feature_queue = Queue(maxsize=5)
-
-        # Processing objects
-        self.score_mapper: ScoreMapper | None = None
-        self.matcher: MatchMaker | None = None
         self.inertia = InertiaEngine(self.config.get_confidence_threshold())
         self.cooldown = CooldownTimer(self.config.get_cooldown_seconds())
 
-        # GUI
+        # Per-movement objects (recreated each load)
+        self.score_mapper: ScoreMapper | None = None
+        self.matcher: MatchMaker | None = None
+
+        # Long-lived browser controller (lives across movements)
+        self.slide_controller = SlideController(slide_url=slide_url)
+
+        # Tkinter root + GUI
         self.root = tk.Tk()
         self.gui = FollowerGUI(self.root, self.state)
 
-        # Keyboard listener flag
-        self._listener_active = False
+        # Worker thread handles
+        self._state_sync_thread: threading.Thread | None = None
+        self._trigger_thread: threading.Thread | None = None
+        self._workers_stop = threading.Event()
 
         logger.info("SequentialFollower initialization complete")
 
-    def _setup_keyboard_listener(self):
-        """
-        Register global 'N' key listener for next movement.
+    # ----------------------------------------------------- lifecycle
+    def run(self) -> None:
+        """Start everything, then run the Tk main loop until the window closes."""
+        logger.info("Launching SlideController …")
+        self.slide_controller.start()
+        if not self.slide_controller.wait_ready(timeout=30.0):
+            err = self.slide_controller.last_error
+            logger.error("SlideController failed to become ready: %s", err)
+            # Continue anyway — the user may still be able to use keyboard
+            # navigation manually; trigger presses will be no-ops.
 
-        Uses 'keyboard' library to intercept 'n' key globally.
-        """
-        if keyboard is None:
-            logger.warning(
-                "keyboard library not installed. Global hotkey not available. "
-                "Install with: pip install keyboard"
-            )
-            return
+        self._bind_keys()
 
-        def on_n_press():
-            logger.info("'N' key pressed")
-            self._load_next_movement()
+        logger.info("Loading first movement …")
+        self._load_current_movement()
 
+        logger.info("Starting state-sync and trigger threads …")
+        self._state_sync_thread = threading.Thread(
+            target=self._state_sync_loop, name="state-sync", daemon=True
+        )
+        self._state_sync_thread.start()
+
+        self._trigger_thread = threading.Thread(
+            target=self._trigger_loop, name="trigger-executor", daemon=True
+        )
+        self._trigger_thread.start()
+
+        logger.info("Press 'N' to advance to next movement. Close GUI window to exit.")
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_gui_closing)
         try:
-            keyboard.add_hotkey('n', on_n_press)
-            self._listener_active = True
-            logger.info("Global 'N' key listener registered")
-        except Exception as e:
-            logger.error(f"Error setting up keyboard listener: {e}")
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            logger.info("Interrupted via keyboard")
+        finally:
+            self._cleanup()
 
-    def _load_current_movement(self):
-        """Load current movement (used for initial load)."""
+    def _on_gui_closing(self) -> None:
+        logger.info("GUI window closing …")
+        self._cleanup()
+        try:
+            self.root.destroy()
+        except Exception:  # noqa: BLE001 — root may already be torn down
+            pass
+
+    def _cleanup(self) -> None:
+        logger.info("Shutting down …")
+        self._workers_stop.set()
+
+        if self.matcher is not None:
+            self.matcher.stop()
+            self.matcher = None
+
+        self.slide_controller.stop()
+        logger.info("Shutdown complete")
+
+    # ---------------------------------------------------- movement loading
+    def _load_current_movement(self) -> None:
+        """Load the movement currently pointed to by the config."""
         movement = self.config.get_current_movement()
         if not movement:
             logger.error("No movement available to load")
             return
+        self._load_movement(movement)
 
-        xml_file = movement.get('xml_file')
-        if not xml_file:
-            logger.error("No xml_file in movement config")
-            return
-
-        logger.info(f"Loading movement: {xml_file}")
-
-        # Create score mapper and matcher
-        try:
-            self.score_mapper = ScoreMapper(xml_file)
-            self.matcher = MatchMaker(xml_file)
-            self.matcher.reset()
-            self.inertia.reset()
-            self.cooldown.cleanup_old()
-
-            logger.info(f"Loaded score: {self.score_mapper}")
-
-        except Exception as e:
-            logger.error(f"Error loading score: {e}")
-            self.state.set_next_trigger(None)
-            return
-
-        # Start audio and feature workers
-        self.audio_worker = AudioCapturer(self.audio_queue)
-        self.audio_worker.start()
-
-        self.feature_worker = FeatureExtractor(self.audio_queue, self.feature_queue)
-        self.feature_worker.start()
-
-        # Update state
-        triggers = movement.get('triggers', [])
-        self.state.set_movement(
-            movement_id=movement.get('id'),
-            xml_file=xml_file,
-            triggers=triggers
-        )
-
-        # Set next trigger measure for display
-        if triggers:
-            next_measure = triggers[0]['measure']
-            self.state.set_next_trigger(next_measure)
-
-        logger.info("Movement loaded successfully")
-
-    def _load_next_movement(self):
-        """Load next movement from config."""
+    def _load_next_movement(self) -> None:
+        """Advance the config pointer and load the next movement."""
         if not self.config.next_movement():
-            logger.warning("No more movements to load")
+            logger.warning("Already at the last movement; nothing to load")
             self.state.set_next_trigger(None)
             return
-
         movement = self.config.get_current_movement()
         if not movement:
-            logger.error("Failed to get movement config")
+            logger.error("Failed to get next movement from config")
             return
+        self._load_movement(movement)
 
-        xml_file = movement.get('xml_file')
+    def _load_movement(self, movement: dict) -> None:
+        """Tear down any current matcher and start a new one for ``movement``."""
+        xml_file = movement.get("xml_file")
         if not xml_file:
-            logger.error("No xml_file in movement config")
+            logger.error("Movement has no xml_file: %s", movement)
             return
 
-        logger.info(f"Loading movement: {xml_file}")
+        logger.info("Loading movement: %s", xml_file)
 
-        # Stop old workers
-        if self.audio_worker:
-            logger.info("Stopping audio worker...")
-            self.audio_worker.stop()
-            time.sleep(0.5)
+        # Stop the previous matcher cleanly before swapping in the new one.
+        if self.matcher is not None:
+            logger.info("Stopping previous matcher …")
+            self.matcher.stop()
+            self.matcher = None
 
-        if self.feature_worker:
-            logger.info("Stopping feature worker...")
-            self.feature_worker.stop()
-            time.sleep(0.5)
-
-        # Reset queues
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-            except:
-                break
-
-        while not self.feature_queue.empty():
-            try:
-                self.feature_queue.get_nowait()
-            except:
-                break
-
-        # Create new score mapper and matcher
         try:
             self.score_mapper = ScoreMapper(xml_file)
-            self.matcher = MatchMaker(xml_file)
-            self.matcher.reset()
-            self.inertia.reset()
-            self.cooldown.cleanup_old()
-
-            logger.info(f"Loaded score: {self.score_mapper}")
-
-        except Exception as e:
-            logger.error(f"Error loading score: {e}")
+            logger.info("Score map ready: %s", self.score_mapper)
+        except Exception as exc:  # noqa: BLE001 — surface and skip
+            logger.error("Failed to build score map: %s", exc, exc_info=True)
             self.state.set_next_trigger(None)
             return
 
-        # Restart audio and feature workers
-        self.audio_worker = AudioCapturer(self.audio_queue)
-        self.audio_worker.start()
+        try:
+            self.matcher = MatchMaker(score_file=xml_file, input_type="audio")
+            self.matcher.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to start matcher: %s", exc, exc_info=True)
+            self.matcher = None
+            return
 
-        self.feature_worker = FeatureExtractor(self.audio_queue, self.feature_queue)
-        self.feature_worker.start()
+        # Reset cross-movement helpers
+        self.inertia.reset()
+        self.cooldown.cleanup_old()
 
-        # Update state
-        triggers = movement.get('triggers', [])
+        triggers = movement.get("triggers", [])
         self.state.set_movement(
-            movement_id=movement.get('id'),
+            movement_id=movement.get("id"),
             xml_file=xml_file,
-            triggers=triggers
+            triggers=triggers,
         )
-
-        # Set next trigger measure for display
         if triggers:
-            next_measure = triggers[0]['measure']
-            self.state.set_next_trigger(next_measure)
+            self.state.set_next_trigger(min(t["measure"] for t in triggers))
 
-        logger.info("Movement loaded successfully")
+        # Best-effort: warn (but don't block) if matcher fails to emit
+        # within a reasonable time. We do this on a side thread so GUI
+        # stays responsive.
+        def _ready_check() -> None:
+            assert self.matcher is not None  # captured at scheduling time
+            if not self.matcher.wait_ready(timeout=15.0):
+                err = self.matcher.last_error
+                logger.error("Matcher did not become ready in time: %s", err)
 
-    def _matching_loop(self):
-        """
-        Background thread: consume features, match, update beat/measure.
+        threading.Thread(target=_ready_check, daemon=True, name="matcher-ready-check").start()
 
-        Runs until thread is stopped.
-        """
-        logger.info("Matching loop started")
+        logger.info("Movement loaded: %s", xml_file)
 
-        while True:
+    # ---------------------------------------------------- worker loops
+    def _state_sync_loop(self) -> None:
+        """Pull the latest (beat, confidence) from the matcher into AppState."""
+        logger.info("State-sync loop started (%.0f Hz)", _STATE_SYNC_HZ)
+        interval = 1.0 / _STATE_SYNC_HZ
+
+        while not self._workers_stop.is_set():
             try:
-                # Check if matcher is available
-                if not self.matcher or not self.score_mapper:
-                    time.sleep(0.1)
+                matcher = self.matcher
+                mapper = self.score_mapper
+                if matcher is None or mapper is None:
+                    time.sleep(interval)
                     continue
 
-                # Get feature from queue (timeout expected when no audio)
-                try:
-                    chroma = self.feature_queue.get(timeout=1.0)
-                except Empty:
-                    # Normal: no feature available yet
-                    continue
+                raw_beat, raw_conf = matcher.get_latest()
+                beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
+                measure = mapper.beat_to_measure(beat)
 
-                # Run matcher
-                beat, confidence = self.matcher.update(chroma)
-
-                # Apply inertia if needed
-                beat, inertia_active, tempo = self.inertia.update(beat, confidence)
-
-                # Convert beat to measure
-                measure = self.score_mapper.beat_to_measure(beat)
-
-                # Update state
                 self.state.update_beat_measure(beat, measure)
-                self.state.set_confidence(confidence)
+                self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
 
-            except Exception as e:
-                logger.error(f"Matching loop error: {type(e).__name__}: {e}", exc_info=True)
-                time.sleep(0.1)
+            except Exception as exc:  # noqa: BLE001 — keep the thread alive
+                logger.error("State-sync error: %s", exc, exc_info=True)
 
-    def _trigger_loop(self):
-        """
-        Background thread: check trigger conditions and execute actions.
+            time.sleep(interval)
 
-        Monitors current measure and executes triggers when conditions are met.
-        """
-        logger.info("Trigger loop started")
+        logger.info("State-sync loop exiting")
 
-        while True:
+    def _trigger_loop(self) -> None:
+        """Watch the current measure and fire slide actions at trigger points."""
+        logger.info("Trigger loop started (%.0f Hz)", _TRIGGER_POLL_HZ)
+        interval = 1.0 / _TRIGGER_POLL_HZ
+
+        while not self._workers_stop.is_set():
             try:
-                time.sleep(0.1)  # Poll every 100ms
-
-                state = self.state.get_all()
-                current_measure = state['measure']
+                snapshot = self.state.get_all()
                 triggers = self.state.current_triggers
+                current_measure = snapshot["measure"]
 
                 if not triggers:
+                    time.sleep(interval)
                     continue
 
-                # Find all triggers at current measure
-                current_triggers = [t for t in triggers if t['measure'] == current_measure]
+                # Update "next trigger" display
+                upcoming = [t["measure"] for t in triggers if t["measure"] > current_measure]
+                self.state.set_next_trigger(min(upcoming) if upcoming else None)
 
-                if not current_triggers:
-                    # Find next trigger
-                    next_measures = [t['measure'] for t in triggers if t['measure'] > current_measure]
-                    if next_measures:
-                        self.state.set_next_trigger(min(next_measures))
-                    else:
-                        self.state.set_next_trigger(None)
+                # Fire any trigger whose measure has been reached and isn't
+                # in cooldown.
+                if snapshot["cooldown_active"]:
+                    time.sleep(interval)
                     continue
 
-                # Check for trigger conditions
-                for trigger in current_triggers:
-                    measure = trigger['measure']
-
-                    if state['cooldown_active']:
-                        logger.debug(f"Measure {measure}: cooldown active, skipping")
+                for trig in triggers:
+                    if trig["measure"] != current_measure:
+                        continue
+                    if not self.cooldown.should_trigger(current_measure):
                         continue
 
-                    if not self.cooldown.should_trigger(measure):
-                        logger.debug(f"Measure {measure}: in rate-limit cooldown")
-                        continue
+                    action = trig.get("action", "right")
+                    note = trig.get("note", "")
+                    self._execute_action(action)
+                    logger.info(
+                        "Trigger fired at measure %s: action=%s note=%s",
+                        current_measure, action, note,
+                    )
+                    self.cooldown.mark_triggered(current_measure)
+                    self.state.activate_cooldown(self.config.get_cooldown_seconds())
+                    break  # one trigger per measure visit
 
-                    # Execute trigger
-                    action = trigger['action']
-                    note = trigger.get('note', '')
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Trigger loop error: %s", exc, exc_info=True)
 
-                    try:
-                        self._execute_action(action)
-                        logger.info(f"Trigger executed at measure {measure}: {action} ({note})")
+            time.sleep(interval)
 
-                        self.cooldown.mark_triggered(measure)
-                        self.state.activate_cooldown(self.config.get_cooldown_seconds())
+        logger.info("Trigger loop exiting")
 
-                    except Exception as e:
-                        logger.error(f"Error executing trigger: {type(e).__name__}: {e}", exc_info=True)
-
-                # Find and set next trigger
-                next_measures = [t['measure'] for t in triggers if t['measure'] > current_measure]
-                if next_measures:
-                    self.state.set_next_trigger(min(next_measures))
-                else:
-                    self.state.set_next_trigger(None)
-
-            except Exception as e:
-                logger.error(f"Trigger loop error: {type(e).__name__}: {e}", exc_info=True)
-
-    def _execute_action(self, action: str):
-        """
-        Execute keyboard action (pyautogui).
-
-        Args:
-            action: Key name (e.g., 'right', 'left', 'up', 'down')
-        """
+    def _execute_action(self, action: str) -> None:
+        """Send the configured action to the slide controller."""
         try:
-            import pyautogui
-            pyautogui.press(action)
-            logger.debug(f"Pressed key: {action}")
-        except ImportError:
-            logger.error("pyautogui not installed, cannot execute action")
-        except Exception as e:
-            logger.error(f"Error executing action '{action}': {e}")
+            self.slide_controller.press(action)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to dispatch slide action %s: %s", action, exc, exc_info=True)
 
-    def run(self):
+    # ---------------------------------------------------- keyboard bindings
+    def _bind_keys(self) -> None:
+        """Bind 'N' (next) to the Tk root window.
+
+        Bindings are scoped to the operator GUI window. The operator screen
+        must have focus for the key to register — this is intentional so the
+        audience-facing Chromium window does not steal the binding.
         """
-        Start application.
+        def _on_n(_event: tk.Event) -> None:
+            logger.info("'N' key pressed → loading next movement")
+            self._load_next_movement()
 
-        Blocks until GUI window is closed.
-        """
-        logger.info("Starting application")
-
-        # Setup keyboard listener
-        self._setup_keyboard_listener()
-
-        # Load first movement automatically
-        logger.info("Auto-loading first movement...")
-        self._load_current_movement()
-
-        # Start worker threads (daemon)
-        logger.info("Starting worker threads...")
-
-        matching_thread = threading.Thread(target=self._matching_loop, daemon=True)
-        matching_thread.start()
-
-        trigger_thread = threading.Thread(target=self._trigger_loop, daemon=True)
-        trigger_thread.start()
-
-        # Prompt user
-        logger.info("Press 'N' to advance to next movement")
-
-        # Run GUI main loop (blocks until window closed)
-        try:
-            self.gui.on_closing = self._on_gui_closing
-            self.root.protocol("WM_DELETE_WINDOW", self._on_gui_closing)
-            self.root.mainloop()
-        except KeyboardInterrupt:
-            logger.info("Interrupted")
-            self._cleanup()
-
-    def _on_gui_closing(self):
-        """Handle GUI window close."""
-        logger.info("GUI closing...")
-        self._cleanup()
-        self.root.destroy()
-
-    def _cleanup(self):
-        """Clean up resources."""
-        logger.info("Cleaning up...")
-
-        # Stop workers
-        if self.audio_worker:
-            self.audio_worker.stop()
-
-        if self.feature_worker:
-            self.feature_worker.stop()
-
-        logger.info("Cleanup complete")
+        self.root.bind("<KeyPress-n>", _on_n)
+        self.root.bind("<KeyPress-N>", _on_n)
+        logger.info("'N' key bound to next-movement on operator GUI")
 
 
-def main():
-    """Entry point."""
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Sequential Live Follower - Real-time orchestral performance tracker'
+        description="Sequential Live Follower — real-time orchestral score-following slide control",
+    )
+    parser.add_argument("config", help="Path to config.json")
+    parser.add_argument(
+        "--slide-url",
+        required=True,
+        help=(
+            "Google Slides URL to control. Use the /present variant "
+            "(e.g. https://docs.google.com/presentation/d/<ID>/present) for "
+            "auto-fullscreen presentation mode."
+        ),
     )
     parser.add_argument(
-        'config',
-        help='Path to config.json'
-    )
-    parser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging'
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable DEBUG-level logging",
     )
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     config_path = Path(args.config)
     if not config_path.exists():
-        print(f"Error: Config file not found: {config_path}")
+        logger.error("Config file not found: %s", config_path)
         return 1
 
     try:
-        app = SequentialFollower(str(config_path))
+        app = SequentialFollower(str(config_path), slide_url=args.slide_url)
         app.run()
         return 0
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Fatal error: %s", exc, exc_info=True)
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
