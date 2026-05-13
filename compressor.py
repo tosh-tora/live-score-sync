@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from music21 import converter, stream, note, chord, meter, key, tempo, metadata
+from music21 import converter, stream, note, chord, meter, key, tempo, metadata, instrument
 
 
 # デフォルト設定
@@ -103,6 +103,7 @@ class PartActivity:
     note_count: int           # 音符数
     rhythmic_resolution: float  # リズム解像度（最小音価の逆数）
     pitch_variance: float      # 音高の分散（メロディ的動き）
+    is_harp: bool = False      # ハープ（他パートがない時のみ選択）
 
     def calculate_score(self, weights: dict) -> float:
         """
@@ -164,6 +165,17 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
     return variance ** 0.5  # 標準偏差
 
 
+def _is_harp_part(part: stream.Part) -> bool:
+    """パートがハープかどうかを判定する。
+    instrument クラスによる判定を優先し、フォールバックとして名前マッチを使う。
+    """
+    instr = part.getInstrument()
+    if isinstance(instr, instrument.Harp):
+        return True
+    name = (part.partName or part.id or "").lower()
+    return any(kw in name for kw in ("harp", "arpa", "harpe"))
+
+
 def _build_tempo_map(score: stream.Score) -> dict[int, list]:
     """全パートを走査して「小節番号 → テンポ要素リスト」のマップを作成する。
     同一小節に複数パートでテンポが書かれている場合は最初に見つかったものを使う。
@@ -189,6 +201,7 @@ def analyze_measure_activity(
     for part in score.parts:
         part_id = part.id or "unknown"
         part_name = part.partName or part_id
+        is_hp = _is_harp_part(part)
 
         # 該当小節を取得
         measure = part.measure(measure_number)
@@ -209,7 +222,8 @@ def analyze_measure_activity(
             part_name=part_name,
             note_count=note_count,
             rhythmic_resolution=rhythmic_res,
-            pitch_variance=pitch_var
+            pitch_variance=pitch_var,
+            is_harp=is_hp,
         ))
 
     return activities
@@ -292,9 +306,16 @@ def compress_score(
         # スコア順にソート（weightsを使用）
         activities.sort(key=lambda x: x.calculate_score(weights), reverse=True)
 
-        # 上位N個を選定（活動があるパートのみ）
+        # 上位N個を選定
+        # 優先順位: ① 非ハープ → ② ハープ（①が0の時のみ）
+        # ハープは他パートに音がまったくない小節でのみ採用する
         active_parts = [a for a in activities if a.note_count > 0]
-        selected = active_parts[:top_n]
+        non_harp = [a for a in active_parts if not a.is_harp]
+        harp     = [a for a in active_parts if a.is_harp]
+        if non_harp:
+            selected = non_harp[:top_n]
+        else:
+            selected = harp[:top_n]
 
         if verbose and m_num <= 5:  # 最初の5小節だけ詳細表示
             print(f"\n小節 {m_num}:")
