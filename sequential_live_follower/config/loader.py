@@ -143,6 +143,23 @@ class ConfigLoader:
         """
         return self.settings.get('inertia_timeout_seconds', 5.0)
 
+    def get_mic_device(self):
+        """Return the audio input device hint (None / int / str).
+
+        Used both by the pymatchmaker MatchMaker and the AudioLevelMonitor
+        so they consume the same source.  On WSL2, the ALSA ``default``
+        device routes to a non-functional null sink while ``pulse`` is the
+        one that actually receives the Windows microphone via WSLg's RDP
+        audio bridge — so we default to ``"pulse"`` when nothing is
+        configured.  Override with a specific index or name in config.json
+        if you have multiple devices.
+        """
+        # ``None`` is a valid explicit value meaning "let the OS pick the
+        # default", so we distinguish it from "missing key".
+        if 'mic_device' in self.settings:
+            return self.settings['mic_device']
+        return 'pulse'
+
     def get_movement_triggers(self, movement_id: Optional[int] = None) -> List[Dict]:
         """
         Get triggers for a movement.
