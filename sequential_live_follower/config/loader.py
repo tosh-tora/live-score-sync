@@ -123,6 +123,26 @@ class ConfigLoader:
         """Get confidence threshold for inertia activation."""
         return self.settings.get('confidence_threshold', 0.4)
 
+    def get_silence_threshold_db(self) -> float:
+        """Get mic RMS threshold (dBFS) below which we treat input as silent.
+
+        When the live mic level is below this threshold, the matcher's
+        reported confidence is forced to 0 — protecting against
+        pymatchmaker's tendency to keep advancing the beat on silence /
+        background noise via its score-driven prior.
+        """
+        return self.settings.get('silence_threshold_db', -40.0)
+
+    def get_inertia_timeout_seconds(self) -> float:
+        """Get the max seconds inertia extrapolation runs before resetting.
+
+        Defensive fallback: if confidence stays below threshold for this
+        long after tracking initially locked in, we reset to the
+        waiting-for-tracking state so a stale lock-in can't drive slides
+        forever.
+        """
+        return self.settings.get('inertia_timeout_seconds', 5.0)
+
     def get_movement_triggers(self, movement_id: Optional[int] = None) -> List[Dict]:
         """
         Get triggers for a movement.

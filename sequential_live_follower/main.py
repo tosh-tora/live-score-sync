@@ -33,6 +33,7 @@ import tkinter as tk
 from pathlib import Path
 
 from sequential_live_follower.config.loader import ConfigLoader
+from sequential_live_follower.core.audio_level import AudioLevelMonitor
 from sequential_live_follower.core.cooldown_timer import CooldownTimer
 from sequential_live_follower.core.inertia_engine import InertiaEngine
 from sequential_live_follower.core.matcher import MatchMaker
@@ -61,8 +62,17 @@ class SequentialFollower:
 
         # Shared state and per-instance helpers
         self.state = AppState()
-        self.inertia = InertiaEngine(self.config.get_confidence_threshold())
+        self.inertia = InertiaEngine(
+            confidence_threshold=self.config.get_confidence_threshold(),
+            inertia_timeout_sec=self.config.get_inertia_timeout_seconds(),
+        )
         self.cooldown = CooldownTimer(self.config.get_cooldown_seconds())
+        # Live mic level monitor — when the mic is silent, force matcher
+        # confidence to 0 so pymatchmaker's score-driven advance cannot
+        # falsely lock in the InertiaEngine.
+        self.audio_monitor = AudioLevelMonitor(
+            threshold_db=self.config.get_silence_threshold_db(),
+        )
 
         # Per-movement objects (recreated each load)
         self.score_mapper: ScoreMapper | None = None
@@ -90,6 +100,9 @@ class SequentialFollower:
     # ----------------------------------------------------- lifecycle
     def run(self) -> None:
         """Start everything, then run the Tk main loop until the window closes."""
+        logger.info("Launching AudioLevelMonitor …")
+        self.audio_monitor.start()
+
         logger.info("Launching SlideController …")
         self.slide_controller.start()
         if not self.slide_controller.wait_ready(timeout=30.0):
@@ -140,6 +153,7 @@ class SequentialFollower:
             self.matcher.stop()
             self.matcher = None
 
+        self.audio_monitor.stop()
         self.slide_controller.stop()
         logger.info("Shutdown complete")
 
@@ -237,6 +251,14 @@ class SequentialFollower:
                     continue
 
                 raw_beat, raw_conf = matcher.get_latest()
+
+                # Silence gate: pymatchmaker keeps advancing the beat from
+                # its score-prior even when the mic is dead silent.  Force
+                # confidence to 0 in that case so the InertiaEngine cannot
+                # falsely lock in tracking.
+                if not self.audio_monitor.is_active():
+                    raw_conf = 0.0
+
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
 
@@ -326,7 +348,7 @@ class SequentialFollower:
 
     # ---------------------------------------------------- keyboard bindings
     def _bind_keys(self) -> None:
-        """Bind 'N' (next) to the Tk root window.
+        """Bind 'N' (next movement) and 'R' (reset tracking) to the Tk root window.
 
         Bindings are scoped to the operator GUI window. The operator screen
         must have focus for the key to register — this is intentional so the
@@ -336,9 +358,18 @@ class SequentialFollower:
             logger.info("'N' key pressed → loading next movement")
             self._load_next_movement()
 
+        def _on_r(_event: tk.Event) -> None:
+            logger.info("'R' key pressed → resetting tracking state")
+            self.inertia.reset_tracking()
+            # Also clear fired triggers so the operator can re-fire from
+            # the top after a manual reset.
+            self._fired_trigger_measures.clear()
+
         self.root.bind("<KeyPress-n>", _on_n)
         self.root.bind("<KeyPress-N>", _on_n)
-        logger.info("'N' key bound to next-movement on operator GUI")
+        self.root.bind("<KeyPress-r>", _on_r)
+        self.root.bind("<KeyPress-R>", _on_r)
+        logger.info("'N' (next movement) and 'R' (reset tracking) bound to operator GUI")
 
 
 def main() -> int:

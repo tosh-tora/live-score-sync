@@ -28,14 +28,22 @@ class InertiaEngine:
     This ensures smooth playback even during difficult audio passages.
     """
 
-    def __init__(self, confidence_threshold: float = 0.4):
+    def __init__(
+        self,
+        confidence_threshold: float = 0.4,
+        inertia_timeout_sec: float = 5.0,
+    ):
         """
         Initialize inertia engine.
 
         Args:
             confidence_threshold: Threshold below which inertia activates (0.0-1.0)
+            inertia_timeout_sec: After this many seconds of sustained low
+                confidence, the engine resets to the waiting-for-tracking
+                state.  Prevents a stale lock-in from driving slides forever.
         """
         self.confidence_threshold = confidence_threshold
+        self.inertia_timeout_sec = inertia_timeout_sec
 
         # Last high-confidence state
         self.last_confident_beat = 0.0
@@ -123,6 +131,23 @@ class InertiaEngine:
 
             delta_time = now - self.last_confident_time
 
+            # Defensive timeout: a stale lock-in must not drive slides
+            # forever.  If we have been below threshold for too long, drop
+            # back into the waiting state so the operator sees measure 1
+            # and no triggers fire until real tracking returns.
+            if delta_time > self.inertia_timeout_sec:
+                logger.warning(
+                    "Inertia timeout: no confident match for %.1fs (> %.1fs); "
+                    "resetting tracking state",
+                    delta_time, self.inertia_timeout_sec,
+                )
+                self._has_ever_matched = False
+                self._confident_streak = 0
+                self.inertia_active = False
+                # Hold tempo so a future lock-in starts with the previous
+                # tempo as its initial guess.
+                return 0.0, False, self.last_tempo_bpm
+
             # Extrapolate: new_beat = last_beat + tempo * delta_time
             # tempo in beats/sec = BPM / 60
             delta_beat = (self.last_tempo_bpm / 60.0) * delta_time
@@ -146,6 +171,19 @@ class InertiaEngine:
         maps to measure 1).
         """
         return self._has_ever_matched
+
+    def reset_tracking(self) -> None:
+        """Drop the current lock-in and return to the waiting state.
+
+        Public version of the streak/lock-in reset, intended for manual
+        recovery (e.g. operator presses 'R' when tracking has clearly
+        drifted away from reality).  Tempo is preserved as the next
+        starting guess.
+        """
+        self._has_ever_matched = False
+        self._confident_streak = 0
+        self.inertia_active = False
+        logger.info("Inertia tracking state reset (manual)")
 
     def reset(self):
         """Reset inertia engine (for movement changes)."""

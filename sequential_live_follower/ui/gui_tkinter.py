@@ -162,6 +162,16 @@ class FollowerGUI:
         )
         self.label_cooldown.pack(pady=2)
 
+        # Key hints (always visible at the bottom)
+        self.label_hints = tk.Label(
+            self.root,
+            text="N: 次の楽章   R: 追従状態をリセット",
+            font=(family, 10),
+            bg="#f0f0f0",
+            fg="#888",
+        )
+        self.label_hints.pack(side=tk.BOTTOM, pady=8)
+
     def update_display(self):
         """Update GUI with current state."""
         try:
