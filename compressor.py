@@ -104,6 +104,7 @@ class PartActivity:
     rhythmic_resolution: float  # リズム解像度（最小音価の逆数）
     pitch_variance: float      # 音高の分散（メロディ的動き）
     is_harp: bool = False      # ハープ（他パートがない時のみ選択）
+    instrument_db: float = 90.0  # 楽器固有の代表音量 (dB)、同スコア時のタイブレーカー
 
     def calculate_score(self, weights: dict) -> float:
         """
@@ -165,6 +166,44 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
     return variance ** 0.5  # 標準偏差
 
 
+# 楽器ごとの代表音量 (dB) — Scribd「Noise Levels in DB for Orchestral Instruments」より各レンジの上限値
+# 同スコアタイ時の優先順位決定に使用する
+# 判定はリスト上から順に最初にマッチしたものを採用するため、
+# より具体的なキーワード（trombone / contrabass / cornetti 等）を上に配置する
+_INSTRUMENT_DB_TABLE: tuple[tuple[tuple[str, ...], float], ...] = (
+    (("piccolo",),                                                  112.0),
+    (("trombone", "tromboni"),                                      106.0),
+    (("trumpet", "tromba", "trombe", "cornet", "cornetti"),         108.0),
+    (("flute", "flauto", "flauti"),                                 105.0),
+    (("percussion", "cymbal", "snare", "schellen", "tamburo",
+      "triangolo", "gran cassa"),                                   105.0),
+    (("horn", "corno", "corni"),                                    104.0),
+    (("cello", "violoncel"),                                        104.0),
+    (("oboe", "oboi"),                                              102.0),
+    (("tuba",),                                                     100.0),
+    (("organ", "organo"),                                           100.0),
+    (("contrafagot", "contra-fagot", "contrabasso",
+      "contrabass", "bassi", "double bass"),                         94.0),
+    (("timpani",),                                                   94.0),
+    (("bassoon", "fagott", "fagotti"),                               90.0),
+    (("violin", "violini", "viola", "viole"),                        90.0),
+    (("harp", "arpa", "harpe"),                                      90.0),
+    (("clarinet", "clarinetti", "clarinetto"),                       82.0),
+)
+
+
+def _get_instrument_db(part: stream.Part) -> float:
+    """パートの代表音量 (dB) を推定する。
+    part_name / part_id に楽器名キーワードが含まれるかで判定し、
+    マッチしなければ 90 dB（中間値）を返す。
+    """
+    name = (part.partName or part.id or "").lower()
+    for keywords, db in _INSTRUMENT_DB_TABLE:
+        if any(kw in name for kw in keywords):
+            return db
+    return 90.0
+
+
 def _is_harp_part(part: stream.Part) -> bool:
     """パートがハープかどうかを判定する。
     instrument クラスによる判定を優先し、フォールバックとして名前マッチを使う。
@@ -202,6 +241,7 @@ def analyze_measure_activity(
         part_id = part.id or "unknown"
         part_name = part.partName or part_id
         is_hp = _is_harp_part(part)
+        db = _get_instrument_db(part)
 
         # 該当小節を取得
         measure = part.measure(measure_number)
@@ -224,6 +264,7 @@ def analyze_measure_activity(
             rhythmic_resolution=rhythmic_res,
             pitch_variance=pitch_var,
             is_harp=is_hp,
+            instrument_db=db,
         ))
 
     return activities
@@ -303,8 +344,11 @@ def compress_score(
         # 活動量を分析
         activities = analyze_measure_activity(score, m_num)
 
-        # スコア順にソート（weightsを使用）
-        activities.sort(key=lambda x: x.calculate_score(weights), reverse=True)
+        # スコア順にソート（weightsを使用）。同スコア時は楽器の音量(dB)で降順タイブレーク
+        activities.sort(
+            key=lambda x: (x.calculate_score(weights), x.instrument_db),
+            reverse=True,
+        )
 
         # 上位N個を選定
         # 優先順位: ① 非ハープ → ② ハープ（①が0の時のみ）
