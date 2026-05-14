@@ -103,7 +103,18 @@ class SequentialFollower:
     def run(self) -> None:
         """Start everything, then run the Tk main loop until the window closes."""
         logger.info("Launching AudioLevelMonitor …")
-        self.audio_monitor.start()
+        try:
+            self.audio_monitor.start()
+        except BaseException as exc:
+            # Belt-and-suspenders: if anything in start() escapes its own
+            # try/except (e.g. PortAudio's C-level abort), we still want
+            # the rest of the app to come up.  The silence gate just stays
+            # disabled and the matcher's raw confidence is used as-is.
+            logger.warning(
+                "AudioLevelMonitor.start() raised (%s: %s); "
+                "continuing without silence gate",
+                type(exc).__name__, exc,
+            )
 
         logger.info("Launching SlideController …")
         self.slide_controller.start()
