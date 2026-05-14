@@ -56,14 +56,21 @@ class AudioLevelMonitor:
     def start(self) -> None:
         """Open the input stream.  Failures are logged, not raised — the
         rest of the system still functions (just without the silence gate).
+
+        We catch ``BaseException`` (not just ``Exception``) around the
+        sounddevice import because PortAudio's C-level initialization can
+        raise SystemExit-like errors or library-specific exceptions whose
+        class hierarchy we do not control.  Suppressing them lets the
+        rest of the app run; the worst that happens is the silence gate
+        is disabled.
         """
         try:
             import sounddevice as sd  # type: ignore
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:
             logger.warning(
-                "AudioLevelMonitor: sounddevice import failed (%s); "
-                "silence gate disabled",
-                exc,
+                "AudioLevelMonitor: sounddevice import failed (%s: %s); "
+                "silence gate disabled. The app will continue without it.",
+                type(exc).__name__, exc,
             )
             return
 
@@ -82,12 +89,12 @@ class AudioLevelMonitor:
                 "AudioLevelMonitor started (threshold=%.1f dBFS, device=%s, sr=%d)",
                 self.threshold_db, self.device, self.sample_rate,
             )
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:
             logger.warning(
-                "AudioLevelMonitor: failed to open input stream (%s); "
+                "AudioLevelMonitor: failed to open input stream (%s: %s); "
                 "silence gate disabled. The app will continue but may be more "
                 "prone to false tracking lock-in during silence.",
-                exc,
+                type(exc).__name__, exc,
             )
             self._stream = None
             self._available = False
