@@ -1,164 +1,113 @@
-# MusicXML Orchestral Presentation Automation System
+# 汎用オーケストラ追従スライド制御システム
 
-A complete system for automated slide control during live orchestral performances. Monitors real-time audio, aligns with MusicXML notation, and sends keyboard commands to advance PowerPoint slides at specified measures.
+ライブオーケストラの生演奏をマイクでリアルタイム解析し、MusicXML 形式の楽譜と照合することで、指定小節番号に到達した瞬間に **Google Slides** のスライドを自動制御するシステムです。
 
-## Project Structure
+## 構成
+
+このリポジトリは 2 つのタスクを含みます:
+
+- **Task 1 (Compressor)**: フルスコアからガイド譜を生成する CLI ツール。Windows/macOS/Linux/WSL2 どこでも動作。
+- **Task 2 (Sequential Live Follower)**: マイク追従 + Google Slides 制御のリアルタイムアプリ。**WSL2 (Ubuntu) 上での動作前提**。
+
+> **なぜ WSL2 必須か**: 追従アルゴリズムに利用する `pymatchmaker` (Matchmaker) は Windows wheel を提供していないため。Windows 11 の WSLg がマイク入力・GUI 表示をホストとシームレスに繋ぐので、操作 GUI もスライドも WSL2 内で完結します。
+
+詳細なセットアップ手順は [`INSTALLATION_JP.md`](INSTALLATION_JP.md) を参照してください。
+
+## プロジェクト構成
 
 ```
-mmatch/
-├── compressor.py                      # Task 1: MusicXML Compressor
-├── compressor_config.example.json     # Configuration template for compressor
-├── requirements.txt                   # Python dependencies
+live-score-sync/
+├── compressor.py                      # Task 1: MusicXML 圧縮
+├── compressor_config.example.json     # 圧縮設定テンプレート
+├── requirements.txt                   # Python 依存パッケージ
 ├── work/
-│   ├── inbox/                         # Input directory (full orchestral MusicXML)
-│   └── outbox/                        # Output directory (compressed guide scores)
-├── sequential_live_follower/          # Task 2: Main Application
-│   ├── main.py                        # Entry point
-│   ├── config_example.json            # Configuration template
-│   ├── README.md                      # Detailed documentation
+│   ├── inbox/                         # Task 1 入力 (フルスコア)
+│   └── outbox/                        # Task 1 出力 (圧縮ガイド譜)
+├── sequential_live_follower/          # Task 2: メインアプリケーション
+│   ├── main.py                        # エントリーポイント (CLI)
+│   ├── config_example.json            # 設定テンプレート
+│   ├── README.md / README_JP.md       # 詳細仕様
 │   ├── core/
-│   │   ├── audio_capturer.py          # PyAudio stream capture
-│   │   ├── feature_extractor.py       # Chroma feature extraction
-│   │   ├── matcher.py                 # PyMatcher DTW integration
-│   │   ├── score_mapper.py            # Beat↔Measure conversion
-│   │   ├── state_manager.py           # Thread-safe state
-│   │   ├── inertia_engine.py          # Confidence-based fallback
-│   │   ├── cooldown_timer.py          # Trigger rate limiting
-│   │   └── keyboard_listener.py       # (Planned) Global hotkey
+│   │   ├── matcher.py                 # pymatchmaker (Matchmaker) ラッパ
+│   │   ├── slide_controller.py        # Playwright (Google Slides 制御)
+│   │   ├── score_mapper.py            # 拍 ↔ 小節変換 (partitura)
+│   │   ├── state_manager.py           # スレッドセーフ状態管理
+│   │   ├── inertia_engine.py          # 信頼度低下時の慣性補外
+│   │   └── cooldown_timer.py          # トリガー連発防止
 │   ├── ui/
-│   │   ├── gui_tkinter.py             # Real-time display
-│   │   └── layouts.py                 # (Planned) UI themes
-│   ├── config/
-│   │   └── loader.py                  # JSON config parser
-│   └── utils/
-│       ├── logger.py                  # (Planned) Logging setup
-│       └── ...
-├── CLAUDE.md                          # Development guidelines
-└── specification.txt                  # System specification
+│   │   └── gui_tkinter.py             # 操作 GUI (現在小節・信頼度表示)
+│   └── config/
+│       └── loader.py                  # config.json 解析
+├── INSTALLATION_JP.md                 # セットアップ手順 (WSL2)
+├── CLAUDE.md                          # 開発ガイダンス
+└── specification.txt                  # システム仕様書
 ```
 
-## Two-Part System
+## Task 1: MusicXML 圧縮 (Compressor)
 
-### Task 1: MusicXML Compressor (Pre-processor)
+**目的**: フルオーケストラスコアから「音楽的に重要なパート」を自動抽出し、リアルタイム追従に適した軽量ガイド譜を生成。
 
-**Purpose**: Extract the "musically important" parts from a full orchestral score and create a lightweight guide score optimized for real-time matching.
-
-**Usage**:
 ```bash
-# Single file
-python compressor.py score.xml
-
-# Batch process all files in work/inbox/
+# work/inbox/ にある全 MusicXML をバッチ処理
 python compressor.py
 
-# With custom weights
+# 単一ファイル + カスタム重み
 python compressor.py score.xml -c compressor_config.json --weight-rhythm 5.0
 ```
 
-**Output**: Compressed guide scores saved to `work/outbox/`
+**主要機能:**
 
-**Key Features**:
-- Automatic part selection based on "activity score" (note density, rhythmic resolution, pitch variance)
-- Configurable weights for fine-tuning
-- Unison deduplication (removes redundant simultaneous notes)
-- Variable time signature support
+- 「活動量スコア」に基づくパート自動選定
+- 設定可能な重み (音符数 / リズム解像度 / 音高分散)
+- ユニゾン (同一タイミングの重複音) 統合
+- 変拍子対応
 
-### Task 2: Sequential Live Follower (Main Application)
+出力は `work/outbox/` に保存されます。
 
-**Purpose**: Real-time performance tracking and slide automation.
+## Task 2: Sequential Live Follower
 
-**Usage**:
-```bash
-python -m sequential_live_follower.main config.json
-```
+**目的**: マイク入力をリアルタイムに追従し、指定小節到達時に Google Slides を自動操作。
 
-**Workflow**:
-1. Application starts with GUI
-2. Press 'N' to load first movement
-3. Perform into microphone
-4. Application automatically syncs to current measure
-5. Keyboard commands sent at configured triggers (slide advance)
-6. Press 'N' to load next movement
-
-**Key Features**:
-- Real-time audio capture (44.1kHz, mono)
-- Chroma feature extraction (librosa)
-- DTW-based beat tracking (pymatchmaker)
-- Confidence-based fallback (inertia mode for low confidence)
-- Measure-accurate trigger execution
-- Live GUI with confidence indicator
-- Cooldown system to prevent misfires
-
-## Installation
-
-1. **Clone/download this repository**
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   On Linux/Mac, PyAudio may require system libraries:
-   ```bash
-   # Ubuntu
-   sudo apt-get install portaudio19-dev
-
-   # Mac
-   brew install portaudio
-   ```
-
-3. **Prepare MusicXML files**:
-   - Place full orchestral scores in `work/inbox/`
-   - Run compressor to generate guide scores in `work/outbox/`
-
-4. **Create configuration**:
-   - Copy `sequential_live_follower/config_example.json` to `config.json`
-   - Edit with your movement files and trigger settings
-
-## Quick Start
+### 起動手順
 
 ```bash
-# 1. Compress orchestral scores
-python compressor.py
+# 1. WSL2 (Ubuntu) ターミナルを開く
 
-# 2. Create config.json (edit paths and triggers)
-cp sequential_live_follower/config_example.json config.json
-# ... edit config.json ...
+# 2. プロジェクトディレクトリへ移動
+cd ~/live-score-sync
 
-# 3. Run application
-python -m sequential_live_follower.main config.json
+# 3. 仮想環境を有効化 ← 毎回必要
+source .venv/bin/activate
+# プロンプトが (.venv) toshi@... に変わることを確認
 
-# 4. In GUI, press 'N' to load first movement
-# 5. Start performing/playing into microphone
-# 6. Slides advance automatically at configured measures
-# 7. Press 'N' to load next movement
+# 4. アプリ起動
+python -m sequential_live_follower.main config.json \
+    --slide-url "https://docs.google.com/presentation/d/<ID>/present" \
+    -v
 ```
 
-## Configuration
+起動時に Chromium (Google Slides) と Tkinter 操作 GUI の 2 ウィンドウが立ち上がります。
+Chromium をプロジェクタ側モニタにドラッグして F11 でフルスクリーン化し、操作 GUI は手元モニタに残します。
 
-### compressor_config.json (Optional)
+### ワークフロー
 
-Controls how musical parts are selected from full scores:
+1. アプリ起動 → 最初の楽章 (`movements[0]`) が自動ロードされ、マイク追従が始まる
+2. 演奏が進むと操作 GUI の「現在小節」がリアルタイム更新
+3. config.json の `triggers[].measure` に到達するたびに、Playwright が Chromium にキーを送り、スライドが進む
+4. 操作 GUI にフォーカスして `N` キーを押すと、次の楽章 (`movements[1]`) がロードされる
 
-```json
-{
-  "weights": {
-    "note_count": 1.0,
-    "rhythmic_resolution": 3.0,
-    "pitch_variance": 0.5
-  },
-  "top_n": 4
-}
-```
+### 主要機能
 
-- **note_count**: Prioritize parts with more notes
-- **rhythmic_resolution**: Prioritize parts with smaller note values (16th vs quarter)
-- **pitch_variance**: Prioritize parts with wider pitch range
-- **top_n**: Number of parts to select per measure
+- マイク入力 (`pymatchmaker` 内部の audio frontend)
+- DTW ベース拍追跡 (`pymatchmaker.Matchmaker.run()`)
+- 信頼度低下時の慣性モード (直前のテンポで仮想進行)
+- 小節精度トリガー実行 + クールダウンによる誤発火防止
+- 操作 GUI (現在小節 / 信頼度 / 次トリガー / 慣性モード表示)
+- Google Slides 自動制御 (Playwright)
 
-### config.json (Required)
+## 設定ファイル
 
-Controls application behavior and slide triggers:
+### config.json (Task 2 で必須)
 
 ```json
 {
@@ -171,110 +120,98 @@ Controls application behavior and slide triggers:
       "id": 1,
       "xml_file": "work/outbox/mv1_guide.xml",
       "triggers": [
-        { "measure": 1, "action": "right", "note": "Movement 1 Start" },
-        { "measure": 45, "action": "right", "note": "Theme A" }
+        { "measure": 1,  "action": "right", "note": "楽章1 開始" },
+        { "measure": 45, "action": "right", "note": "テーマA" }
       ]
     }
   ]
 }
 ```
 
-## System Requirements
+`action` は `"right"`, `"left"`, `"up"`, `"down"`, `"space"`, `"enter"` などに対応 (内部で Playwright の `ArrowRight` 等にマップされます)。
 
-- **Python**: 3.10+
-- **CPU**: Multi-core recommended (for real-time feature extraction)
-- **Memory**: 1GB+ (for MusicXML parsing + queues)
-- **Audio**: Microphone input device
-- **Display**: Display for GUI (or headless with modifications)
-- **OS**: Linux, macOS, Windows (requires PortAudio on Linux/Mac)
+### compressor_config.json (Task 1 オプション)
 
-## Architecture Notes
-
-### Threading Model
-
-All real-time operations run in background threads to prevent GUI freezing:
-
-- **AudioCapturer** (daemon thread): Reads microphone frames continuously
-- **FeatureExtractor** (daemon thread): Buffers audio, extracts Chroma features
-- **MatchingEngine** (implicit in main loop): Runs DTW on each feature frame
-- **TriggerExecutor** (daemon thread): Monitors for triggers, executes actions
-- **GUI Main Loop** (tkinter): Polls state, updates display without blocking
-
-### Queue-Based Design
-
-Components communicate via thread-safe queues to prevent data races:
-
-```
-audio_queue (audio frames) → feature_queue (Chroma vectors) → state_manager → GUI
-                                                            → TriggerExecutor
+```json
+{
+  "weights": {
+    "note_count": 1.0,
+    "rhythmic_resolution": 3.0,
+    "pitch_variance": 0.5
+  },
+  "top_n": 4
+}
 ```
 
-### Error Handling & Robustness
+## システム要件
 
-- Each thread has try-catch at top level
-- Inertia mode maintains playback during matching failures
-- Cooldown system prevents trigger misfires
-- Graceful degradation (e.g., mock matcher if pymatchmaker unavailable)
+- **OS (Task 1)**: Windows / macOS / Linux / WSL2
+- **OS (Task 2)**: Windows 11 + WSL2 (Ubuntu 24.04) を推奨。WSLg のマイク・GUI パススルーが必須。
+- **Python**: 3.10 以上 (`pymatchmaker` 0.2.1 は 3.11/3.12/3.13 対応)
+- **メモリ**: 2GB 以上推奨
+- **オーディオ**: マイク入力デバイス
+- **ディスプレイ**: 操作 GUI + プロジェクタの 2 系統
 
-## Troubleshooting
+詳細は [`INSTALLATION_JP.md`](INSTALLATION_JP.md) を参照。
 
-### Audio Not Captured
-- Check microphone is working: `python -c "import pyaudio; print(pyaudio.PyAudio().get_device_count())"`
-- Verify microphone is default input device in system settings
+## アーキテクチャ概要
 
-### Constant "INERTIA MODE"
-- Audio quality poor or score mismatch
-- Try re-recording in quieter environment
-- Verify guide score matches performed piece
+### スレッドモデル
 
-### Triggers Not Firing
-- Check measure numbers in config.json match actual score
-- Verify PowerPoint is in focus and active
-- Test keyboard input works: `python -c "import pyautogui; pyautogui.press('right')"`
+```
+メインスレッド
+  └─ Tkinter 操作 GUI (現在小節・信頼度を 100ms 周期で再描画)
 
-### GUI Not Displaying
-- Ensure X11 forwarding enabled if remote
-- Try headless mode (future enhancement)
-
-## Development
-
-See `CLAUDE.md` for development guidelines, workflow, and best practices.
-
-## Testing
-
-[Integration tests to be added - currently manual testing recommended]
-
-## Performance Profiling
-
-Monitor CPU usage:
-```bash
-python -m sequential_live_follower.main config.json -v  # Verbose logging
-# Watch for slow components in logs
+ワーカースレッド (daemon)
+  ├─ matchmaker-worker      Matchmaker.run() ジェネレータをドライブし、最新拍位置を AppState に書き込む
+  ├─ slide-controller       Playwright で Chromium を保持し、Queue 経由でキー送信
+  ├─ state-sync (20Hz)      matcher.get_latest() → InertiaEngine → ScoreMapper → AppState
+  └─ trigger-executor (20Hz) AppState を監視し、目標小節到達で slide_controller.press()
 ```
 
-Feature extraction typically takes 20-50% CPU on modern machines; matching takes 5-10%.
+### データフロー
 
-## Future Enhancements
+```
+マイク
+  ↓ (pymatchmaker 内部で chroma 抽出 + DTW)
+Matchmaker.run() ── beat ──→ MatchMaker.get_latest()
+                                     ↓ (state-sync)
+                              InertiaEngine
+                                     ↓
+                              ScoreMapper (beat → measure)
+                                     ↓
+                              AppState ─→ Tkinter GUI 表示
+                                     ↓ (trigger-executor)
+                              SlideController.press("right")
+                                     ↓
+                              Chromium (Google Slides) → 次スライド
+```
 
-- [ ] MIDI input support (alternative to audio)
-- [ ] Web UI (browser-based alternative to Tkinter)
-- [ ] Waveform visualization
-- [ ] Beat grid display overlay
-- [ ] Automatic confidence-adaptive cooldown
-- [ ] Multi-instrument support (separate DTW per section)
-- [ ] Post-performance trigger logging & analysis
+### エラーハンドリング
 
-## References
+- 各ワーカーのトップレベルで try/except、ログ出力
+- マッチング信頼度低下時は `InertiaEngine` が前回テンポで仮想進行
+- 連続発火防止: 同一小節への再トリガーは `cooldown_seconds` 経過まで抑止
+- 楽章切り替え時に `MatchMaker` インスタンスを破棄して再生成
 
-- **PyMatcher**: DTW algorithm for music alignment
-- **Partitura**: MusicXML structure analysis
-- **Music21**: Music notation library
-- **Librosa**: Audio feature extraction
+## トラブルシューティング
 
-## License
+| 症状 | 原因と対処 |
+|------|-----------|
+| `python: command not found` | 仮想環境が有効でない。`source .venv/bin/activate` を実行してから再試行 |
+| `from matchmaker import Matchmaker` が ImportError | WSL2 内の venv で `pip install pymatchmaker` を実行 |
+| `Could not find FluidSynth library` | `sudo apt install fluidsynth libfluidsynth-dev` |
+| sounddevice にデバイスが表示されない | `sudo apt install libasound2-plugins` + `~/.asoundrc` の設定 (INSTALLATION_JP.md 参照) |
+| マイクが認識されない | `wsl --shutdown` 後に再起動し、Windows 側の入力デバイス設定を確認 |
+| Chromium がクラッシュ | `playwright install chromium` 未実行 |
+| トリガーでスライドが進まない | Chromium ウィンドウをクリックしてフォーカス、F11 でプレゼンモード化 |
+| 信頼度が常に低い | マイクゲイン調整、`confidence_threshold` を下げる、ガイド譜が実演奏曲と一致しているか確認 |
+| `N` キーで楽章送りできない | 操作 GUI ウィンドウにフォーカスを当てる |
 
-[To be determined]
+## リファレンス
 
-## Contact
-
-For issues or questions, please open an issue on the repository.
+- **pymatchmaker (Matchmaker)**: リアルタイム DTW 追従ライブラリ — https://github.com/pymatchmaker/matchmaker
+- **Partitura**: MusicXML 構造解析 — https://partitura.readthedocs.io/
+- **Playwright**: ブラウザ自動化 — https://playwright.dev/python/
+- **Music21**: 音楽記譜法ライブラリ (Task 1 で利用)
+- **Librosa**: オーディオ特徴抽出 (Task 1 補助)
