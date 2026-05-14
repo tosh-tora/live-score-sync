@@ -130,8 +130,14 @@ class ConfigLoader:
         reported confidence is forced to 0 — protecting against
         pymatchmaker's tendency to keep advancing the beat on silence /
         background noise via its score-driven prior.
+
+        Default is intentionally permissive (-55 dBFS).  In observed WSL2
+        + RDP-audio setups, normal speech registers around -50 dBFS at the
+        mic, so a stricter default (-40 dBFS) ended up gating *all* live
+        audio out and the system never tracked.  Set to a very low number
+        (e.g. -100) to effectively disable the silence gate.
         """
-        return self.settings.get('silence_threshold_db', -40.0)
+        return self.settings.get('silence_threshold_db', -55.0)
 
     def get_inertia_timeout_seconds(self) -> float:
         """Get the max seconds inertia extrapolation runs before resetting.

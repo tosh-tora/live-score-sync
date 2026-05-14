@@ -180,6 +180,14 @@ class FollowerGUI:
         )
         self.label_cooldown.pack(pady=2)
 
+        # Mic level (live dBFS reading + silence-gate status).  Critical for
+        # diagnosing "system never tracks" — if the level never gets above
+        # config.silence_threshold_db, the gate is suppressing every frame.
+        self.label_mic_level = tk.Label(
+            self.root, text="Mic: -- dBFS", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="#444"
+        )
+        self.label_mic_level.pack(pady=2)
+
         # Key hints (always visible at the bottom)
         self.label_hints = tk.Label(
             self.root,
@@ -247,6 +255,17 @@ class FollowerGUI:
                 self.label_cooldown.config(text="🔒 Cooldown active")
             else:
                 self.label_cooldown.config(text="")
+
+            # Mic level / silence gate
+            mic_db = state.get('mic_level_db', -120.0)
+            gate = state.get('silence_gate_active', False)
+            if gate:
+                mic_text = f"Mic: {mic_db:.1f} dBFS  ⚠ 無音判定 (閾値未満)"
+                mic_color = "red"
+            else:
+                mic_text = f"Mic: {mic_db:.1f} dBFS  ✓ 入力検出"
+                mic_color = "#2a7"
+            self.label_mic_level.config(text=mic_text, fg=mic_color)
 
         except Exception as e:
             logger.error(f"GUI update error: {e}")
