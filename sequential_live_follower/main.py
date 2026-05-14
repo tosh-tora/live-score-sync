@@ -272,9 +272,12 @@ class SequentialFollower:
                 # Silence gate: pymatchmaker keeps advancing the beat from
                 # its score-prior even when the mic is dead silent.  Force
                 # confidence to 0 in that case so the InertiaEngine cannot
-                # falsely lock in tracking.
+                # falsely lock in tracking.  When AudioLevelMonitor failed
+                # to open its stream, is_active() falls through to True so
+                # we don't unfairly gate the matcher's own confidence.
+                mic_available = self.audio_monitor.is_available()
                 mic_level_db = self.audio_monitor.get_level_db()
-                gate_active = not self.audio_monitor.is_active()
+                gate_active = mic_available and not self.audio_monitor.is_active()
                 if gate_active:
                     raw_conf = 0.0
 
@@ -284,7 +287,7 @@ class SequentialFollower:
                 self.state.update_beat_measure(beat, measure)
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
-                self.state.set_mic_level(mic_level_db, gate_active)
+                self.state.set_mic_level(mic_level_db, gate_active, mic_available)
 
             except Exception as exc:  # noqa: BLE001 — keep the thread alive
                 logger.error("State-sync error: %s", exc, exc_info=True)
