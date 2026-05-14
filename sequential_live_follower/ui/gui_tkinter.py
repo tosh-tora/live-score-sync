@@ -256,10 +256,18 @@ class FollowerGUI:
             else:
                 self.label_cooldown.config(text="")
 
-            # Mic level / silence gate
+            # Mic level / silence gate.  Three distinct states:
+            #   - monitor failed to start → can't measure anything, warn the
+            #     operator that the silence gate is disabled
+            #   - level below threshold → silence gate is suppressing matcher
+            #   - level above threshold → input is being heard
+            mic_available = state.get('mic_monitor_available', False)
             mic_db = state.get('mic_level_db', -120.0)
             gate = state.get('silence_gate_active', False)
-            if gate:
+            if not mic_available:
+                mic_text = "Mic: 監視無効 (silence gate 無効) — ログを確認してください"
+                mic_color = "#c60"
+            elif gate:
                 mic_text = f"Mic: {mic_db:.1f} dBFS  ⚠ 無音判定 (閾値未満)"
                 mic_color = "red"
             else:

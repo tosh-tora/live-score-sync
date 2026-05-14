@@ -48,8 +48,12 @@ class AppState:
         # Live microphone level (dBFS) and whether the silence gate is
         # currently suppressing matcher confidence.  Surfaced to the GUI
         # so the operator can tell whether the mic is actually being heard.
+        # ``mic_monitor_available`` is False when AudioLevelMonitor failed
+        # to open its stream — in that case dBFS is meaningless and the
+        # silence gate is bypassed.
         self.mic_level_db: float = -120.0
         self.silence_gate_active: bool = False
+        self.mic_monitor_available: bool = False
 
         # UI update signaling
         self.ui_update_event = threading.Event()
@@ -74,6 +78,7 @@ class AppState:
                 'last_trigger_measure': self.last_trigger_measure,
                 'mic_level_db': self.mic_level_db,
                 'silence_gate_active': self.silence_gate_active,
+                'mic_monitor_available': self.mic_monitor_available,
             }
 
     def update_beat_measure(self, beat: float, measure: int):
@@ -138,17 +143,26 @@ class AppState:
                 self.inertia_tempo_bpm = tempo_bpm
         self.ui_update_event.set()
 
-    def set_mic_level(self, level_db: float, gate_active: bool):
-        """Update mic level (dBFS) and silence-gate state.
+    def set_mic_level(
+        self,
+        level_db: float,
+        gate_active: bool,
+        monitor_available: bool = True,
+    ):
+        """Update mic level (dBFS), silence-gate state and monitor health.
 
         Args:
             level_db: Current mic RMS level in dBFS.
             gate_active: True if the silence gate is currently forcing
                 matcher confidence to 0 (i.e. level_db <= threshold).
+            monitor_available: False if AudioLevelMonitor failed to open
+                its input stream — dBFS is then meaningless and the gate
+                is bypassed.
         """
         with self._lock:
             self.mic_level_db = level_db
             self.silence_gate_active = gate_active
+            self.mic_monitor_available = monitor_available
         self.ui_update_event.set()
 
     def set_next_trigger(self, measure_num: Optional[int]):
