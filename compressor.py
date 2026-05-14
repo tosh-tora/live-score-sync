@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from music21 import converter, stream, note, chord, meter, key, tempo, clef, instrument
+from music21 import converter, stream, note, chord, meter, key, tempo, metadata, instrument, clef
 
 
 # デフォルト設定
@@ -104,7 +104,9 @@ class PartActivity:
     note_count: int           # 音符数
     rhythmic_resolution: float  # リズム解像度（最小音価の逆数）
     pitch_variance: float      # 音高の分散（メロディ的動き）
-    is_percussion: bool = False  # 打楽器パート（マッチング除外優先）
+    is_harp: bool = False      # ハープ（非打楽器・非ハープがない時のみ選択）
+    is_percussion: bool = False  # 打楽器（①②どちらも0の時のみ選択）
+    instrument_db: float = 90.0  # 楽器固有の代表音量 (dB)、同スコア時のタイブレーカー
 
     def calculate_score(self, weights: dict) -> float:
         """
@@ -166,6 +168,60 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
     return variance ** 0.5  # 標準偏差
 
 
+# 楽器ごとの代表音量 (dB) — Scribd「Noise Levels in DB for Orchestral Instruments」より各レンジの上限値
+# 同スコアタイ時の優先順位決定に使用する
+# 判定はリスト上から順に最初にマッチしたものを採用するため、
+# より具体的なキーワードを上に配置する。
+# 例) "Tamburo piccolo"(小太鼓) を "piccolo"(笛) と取り違えないよう打楽器を先に置く
+_INSTRUMENT_DB_TABLE: tuple[tuple[tuple[str, ...], float], ...] = (
+    # 打楽器（"tamburo piccolo" などを Piccolo より先に判定）
+    (("percussion", "cymbal", "snare", "schellen", "tamburo",
+      "triangolo", "gran cassa"),                                   105.0),
+    (("timpani",),                                                   94.0),
+    # 木管・金管
+    (("piccolo",),                                                  112.0),
+    (("trombone", "tromboni"),                                      106.0),
+    (("trumpet", "tromba", "trombe", "cornet", "cornetti"),         108.0),
+    (("flute", "flauto", "flauti"),                                 105.0),
+    (("horn", "corno", "corni"),                                    104.0),
+    (("oboe", "oboi"),                                              102.0),
+    (("tuba",),                                                     100.0),
+    (("organ", "organo"),                                           100.0),
+    (("contrafagot", "contra-fagot", "contrabasso",
+      "contrabass", "bassi", "double bass"),                         94.0),
+    (("bassoon", "fagott", "fagotti"),                               90.0),
+    # 弦・ハープ
+    (("cello", "violoncel"),                                        104.0),
+    (("violin", "violini", "viola", "viole"),                        90.0),
+    (("harp", "arpa", "harpe"),                                      90.0),
+    # クラリネット
+    (("clarinet", "clarinetti", "clarinetto"),                       82.0),
+)
+
+
+def _get_instrument_db(part: stream.Part) -> float:
+    """パートの代表音量 (dB) を推定する。
+    part_name / part_id に楽器名キーワードが含まれるかで判定し、
+    マッチしなければ 90 dB（中間値）を返す。
+    """
+    name = (part.partName or part.id or "").lower()
+    for keywords, db in _INSTRUMENT_DB_TABLE:
+        if any(kw in name for kw in keywords):
+            return db
+    return 90.0
+
+
+def _is_harp_part(part: stream.Part) -> bool:
+    """パートがハープかどうかを判定する。
+    instrument クラスによる判定を優先し、フォールバックとして名前マッチを使う。
+    """
+    instr = part.getInstrument()
+    if isinstance(instr, instrument.Harp):
+        return True
+    name = (part.partName or part.id or "").lower()
+    return any(kw in name for kw in ("harp", "arpa", "harpe"))
+
+
 def _find_active_attribute(
     source_part: stream.Part,
     measure_number: int,
@@ -223,14 +279,35 @@ def _apply_source_attributes(
 
 
 def _is_percussion_part(part: stream.Part) -> bool:
-    """パートが音程のない打楽器パートかどうかを判定する。
-    instrument クラスによる判定を優先し、フォールバックとして PercussionClef を確認する。
+    """パートが打楽器かどうかを判定する。
+    instrument クラス・PercussionClef・名前マッチで判定する。
     """
     instr = part.getInstrument()
     if isinstance(instr, instrument.UnpitchedPercussion):
         return True
     first_clef = part.recurse().getElementsByClass(clef.Clef).first()
-    return isinstance(first_clef, clef.PercussionClef)
+    if isinstance(first_clef, clef.PercussionClef):
+        return True
+    name = (part.partName or part.id or "").lower()
+    return any(kw in name for kw in (
+        "percussion", "cymbal", "snare", "schellen",
+        "tamburo", "triangolo", "gran cassa", "timpani",
+    ))
+
+
+def _build_tempo_map(score: stream.Score) -> dict[int, list]:
+    """全パートを走査して「小節番号 → テンポ要素リスト」のマップを作成する。
+    同一小節に複数パートでテンポが書かれている場合は最初に見つかったものを使う。
+    """
+    tempo_map: dict[int, list] = {}
+    for part in score.parts:
+        for m in part.getElementsByClass(stream.Measure):
+            if m.number is None or m.number in tempo_map:
+                continue
+            tempos = list(m.getElementsByClass(tempo.TempoIndication))
+            if tempos:
+                tempo_map[m.number] = tempos
+    return tempo_map
 
 
 def analyze_measure_activity(
@@ -243,7 +320,9 @@ def analyze_measure_activity(
     for part in score.parts:
         part_id = part.id or "unknown"
         part_name = part.partName or part_id
+        is_hp = _is_harp_part(part)
         is_perc = _is_percussion_part(part)
+        db = _get_instrument_db(part)
 
         # 該当小節を取得
         measure = part.measure(measure_number)
@@ -265,7 +344,9 @@ def analyze_measure_activity(
             note_count=note_count,
             rhythmic_resolution=rhythmic_res,
             pitch_variance=pitch_var,
+            is_harp=is_hp,
             is_percussion=is_perc,
+            instrument_db=db,
         ))
 
     return activities
@@ -319,6 +400,15 @@ def compress_score(
     # 新しいスコアを作成
     new_score = stream.Score()
 
+    # タイトルを「元のタイトル ガイド譜」に設定
+    original_title = (
+        score.metadata.title
+        if score.metadata and score.metadata.title
+        else Path(input_path).stem
+    )
+    new_score.metadata = metadata.Metadata()
+    new_score.metadata.title = f"{original_title} ガイド譜"
+
     # top_n 個の出力パートを作成
     # 移調なしの汎用楽器を設定する（toSoundingPitch() 済みの concert pitch が
     # 書き出し時に再移調されないようにするため）
@@ -332,6 +422,9 @@ def compress_score(
         new_part.insert(0, generic_instrument)
         output_parts.append(new_part)
 
+    # 元スコアのテンポマップを構築（小節番号 → テンポ要素リスト）
+    tempo_map = _build_tempo_map(score)
+
     # 各出力パートが直前に使用した元パートID（楽器切替を検知するため）
     last_source_ids: list[str | None] = [None] * top_n
 
@@ -340,19 +433,26 @@ def compress_score(
         # 活動量を分析
         activities = analyze_measure_activity(score, m_num)
 
-        # スコア順にソート（weightsを使用）
-        activities.sort(key=lambda x: x.calculate_score(weights), reverse=True)
+        # スコア順にソート（weightsを使用）。同スコア時は楽器の音量(dB)で降順タイブレーク
+        activities.sort(
+            key=lambda x: (x.calculate_score(weights), x.instrument_db),
+            reverse=True,
+        )
 
-        # 上位N個を選定（活動があるパートのみ）
-        # 原則: 非打楽器を優先。非打楽器が不足する場合のみ打楽器で補完。
-        # 例外: 非打楽器が1つもアクティブでない小節は打楽器を使用。
+        # 上位N個を選定
+        # 優先順位:
+        #   ① 非打楽器・非ハープ（最優先）
+        #   ② ハープ（①が0の時のみ採用）
+        #   ③ 打楽器（①②どちらも0の時のみ採用）
+        # 打楽器とハープは pymatchmaker のマッチングに寄与しにくいため極力除外する
         active_parts = [a for a in activities if a.note_count > 0]
-        non_perc = [a for a in active_parts if not a.is_percussion]
-        perc = [a for a in active_parts if a.is_percussion]
-        if non_perc:
-            selected = non_perc[:top_n]
-            if len(selected) < top_n:
-                selected += perc[:top_n - len(selected)]
+        primary = [a for a in active_parts if not a.is_harp and not a.is_percussion]
+        harp    = [a for a in active_parts if a.is_harp and not a.is_percussion]
+        perc    = [a for a in active_parts if a.is_percussion]
+        if primary:
+            selected = primary[:top_n]
+        elif harp:
+            selected = harp[:top_n]
         else:
             selected = perc[:top_n]
 
@@ -382,9 +482,18 @@ def compress_score(
                         new_measure = copy.deepcopy(source_measure)
                         new_measure.number = m_num
                         # 元パート（楽器）が前回から切り替わった場合は
-                        # 新しい楽器の clef / keySignature / instrument を明示挿入する
+                        # 新しい楽器の clef / keySignature を明示挿入する
                         if last_source_ids[i] != source_part_id:
                             _apply_source_attributes(new_measure, source_part, m_num)
+
+                        # テンポ処理: Guide 1 のみ元スコアのテンポを保持/挿入し、
+                        # それ以外のパートからはテンポ要素を除去（重複防止）
+                        for existing in list(new_measure.getElementsByClass(tempo.TempoIndication)):
+                            new_measure.remove(existing)
+                        if i == 0 and m_num in tempo_map:
+                            for t in tempo_map[m_num]:
+                                new_measure.insert(0, copy.deepcopy(t))
+
                         output_parts[i].append(new_measure)
                         last_source_ids[i] = source_part_id
                     else:

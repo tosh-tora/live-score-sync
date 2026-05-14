@@ -1,16 +1,18 @@
-# Required dependencies
+# Core dependencies (cross-platform)
 music21>=8.0
 partitura>=0.3.10
 librosa>=0.9.0
 numpy>=1.20
 pandas>=1.0
 scikit-learn>=0.20
-pyautogui>=0.9.53
-keyboard>=0.13.5
 
-# Optional dependencies (for full audio/matching functionality)
-# pyaudio>=0.2.11        # Install: pip install pyaudio (requires PortAudio development libs)
-# pymatchmaker==0.1.1rc1 # Install from source if available
+# Task 2 (Sequential Live Follower) runtime - requires WSL2 / Linux
+# pymatchmaker does not publish Windows wheels; install inside WSL2.
+pymatchmaker>=0.2.1
+playwright>=1.40
+sounddevice>=0.4.6
 
-
-
+# Note: the 'N' key for movement advance is bound on the Tkinter operator
+# window (focused-window key binding); no system-level hotkey library is
+# required. The previous `keyboard` and `pyautogui` dependencies are no
+# longer used.
