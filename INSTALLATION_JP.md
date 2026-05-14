@@ -182,6 +182,8 @@ https://docs.google.com/presentation/d/<PRESENTATION_ID>/present?slide=id.p
 | トリガー時にスライドが進まない | Chromium がフォーカスを失っている / プレゼンモードでない | Chromium ウィンドウをクリック → F11 でフルスクリーンに |
 | 信頼度が常に低い | マイクゲイン低 / 楽器配置と離れている | 入力ゲインを上げる、`config.json` の `confidence_threshold` を下げる |
 | sounddevice の `default` デバイスが完全無音 (-98 dBFS) | WSL2 の ALSA `default` が PulseAudio に届いていない | `config.json` の `settings.mic_device` を `"pulse"` (デフォルト) のままにする。`~/.asoundrc` だけでは sounddevice が pulse 経由にならない環境がある |
+| `Launching AudioLevelMonitor …` から進まない / `import sounddevice` で長時間ハング / pymatchmaker が `Audio device not found` でデバイス一覧が空 | PortAudio/PulseAudio が壊れた状態。WSLg の audio session が固まっている | PowerShell から `wsl --shutdown` を実行し WSL2 を完全再起動。`python -c "import sounddevice; print(sounddevice.query_devices())"` が即座に device 一覧を返すまで回復しない |
+| GUI Mic 行が `監視無効 (silence gate 無効)` のまま | AudioLevelMonitor の起動が失敗 or 10 秒タイムアウト | 上と同じく `wsl --shutdown` で audio をリセット。それでも改善しなければ起動ログの WARNING を確認 |
 
 ---
 

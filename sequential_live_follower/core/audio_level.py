@@ -53,51 +53,85 @@ class AudioLevelMonitor:
         self._available = False  # set True after a successful start()
 
     # ---------------------------------------------------------- lifecycle
-    def start(self) -> None:
-        """Open the input stream.  Failures are logged, not raised — the
-        rest of the system still functions (just without the silence gate).
+    def start(self, timeout_sec: float = 10.0) -> None:
+        """Open the input stream off the main thread with a timeout.
 
-        We catch ``BaseException`` (not just ``Exception``) around the
-        sounddevice import because PortAudio's C-level initialization can
-        raise SystemExit-like errors or library-specific exceptions whose
-        class hierarchy we do not control.  Suppressing them lets the
-        rest of the app run; the worst that happens is the silence gate
-        is disabled.
+        On a healthy host both the ``import sounddevice`` and the
+        ``InputStream`` open complete in well under a second.  In real
+        deployments (WSL2 + WSLg) we've seen the import hang for minutes
+        when PortAudio's PulseAudio backend was in a bad state, which
+        makes the whole app appear frozen.  We run the work on a daemon
+        thread and give up after ``timeout_sec`` so the rest of the app
+        always comes up — the silence gate is simply disabled in that
+        case.
+
+        We also catch ``BaseException`` because PortAudio's C-level
+        initialization can raise SystemExit-like errors or
+        library-specific exceptions whose class hierarchy we do not
+        control.
         """
-        try:
-            import sounddevice as sd  # type: ignore
-        except BaseException as exc:
+        import threading
+
+        outcome: dict = {"done": False, "stream": None, "exc": None}
+
+        def _worker() -> None:
+            try:
+                import sounddevice as sd  # type: ignore
+            except BaseException as exc:
+                outcome["exc"] = exc
+                outcome["done"] = True
+                return
+            try:
+                stream = sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=1,
+                    blocksize=self.block_size,
+                    callback=self._callback,
+                    device=self.device,
+                    dtype="float32",
+                )
+                stream.start()
+                outcome["stream"] = stream
+            except BaseException as exc:
+                outcome["exc"] = exc
+            finally:
+                outcome["done"] = True
+
+        worker = threading.Thread(
+            target=_worker, name="audio-monitor-init", daemon=True
+        )
+        worker.start()
+        worker.join(timeout=timeout_sec)
+
+        if not outcome["done"]:
             logger.warning(
-                "AudioLevelMonitor: sounddevice import failed (%s: %s); "
-                "silence gate disabled. The app will continue without it.",
-                type(exc).__name__, exc,
+                "AudioLevelMonitor: initialization did not complete within %.1fs; "
+                "PortAudio/PulseAudio may be in a bad state. Try `wsl --shutdown` "
+                "from PowerShell to reset audio. Silence gate disabled.",
+                timeout_sec,
             )
+            self._stream = None
+            self._available = False
             return
 
-        try:
-            self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                blocksize=self.block_size,
-                callback=self._callback,
-                device=self.device,
-                dtype="float32",
-            )
-            self._stream.start()
-            self._available = True
-            logger.info(
-                "AudioLevelMonitor started (threshold=%.1f dBFS, device=%s, sr=%d)",
-                self.threshold_db, self.device, self.sample_rate,
-            )
-        except BaseException as exc:
+        if outcome["exc"] is not None:
+            exc = outcome["exc"]
             logger.warning(
-                "AudioLevelMonitor: failed to open input stream (%s: %s); "
-                "silence gate disabled. The app will continue but may be more "
-                "prone to false tracking lock-in during silence.",
+                "AudioLevelMonitor: failed to start (%s: %s); silence gate disabled. "
+                "The app will continue without it.",
                 type(exc).__name__, exc,
             )
             self._stream = None
             self._available = False
+            return
+
+        self._stream = outcome["stream"]
+        self._available = self._stream is not None
+        if self._available:
+            logger.info(
+                "AudioLevelMonitor started (threshold=%.1f dBFS, device=%s, sr=%d)",
+                self.threshold_db, self.device, self.sample_rate,
+            )
 
     def stop(self) -> None:
         if self._stream is None:
