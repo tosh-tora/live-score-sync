@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from music21 import converter, stream, note, chord, meter, key, tempo, metadata, instrument
+from music21 import converter, stream, note, chord, meter, key, tempo, metadata, instrument, clef
 
 
 # デフォルト設定
@@ -103,7 +103,8 @@ class PartActivity:
     note_count: int           # 音符数
     rhythmic_resolution: float  # リズム解像度（最小音価の逆数）
     pitch_variance: float      # 音高の分散（メロディ的動き）
-    is_harp: bool = False      # ハープ（他パートがない時のみ選択）
+    is_harp: bool = False      # ハープ（非打楽器・非ハープがない時のみ選択）
+    is_percussion: bool = False  # 打楽器（他にアクティブパートがない時のみ選択）
     instrument_db: float = 90.0  # 楽器固有の代表音量 (dB)、同スコア時のタイブレーカー
 
     def calculate_score(self, weights: dict) -> float:
@@ -220,6 +221,23 @@ def _is_harp_part(part: stream.Part) -> bool:
     return any(kw in name for kw in ("harp", "arpa", "harpe"))
 
 
+def _is_percussion_part(part: stream.Part) -> bool:
+    """パートが打楽器かどうかを判定する。
+    instrument クラス・PercussionClef・名前マッチで判定する。
+    """
+    instr = part.getInstrument()
+    if isinstance(instr, instrument.UnpitchedPercussion):
+        return True
+    first_clef = part.recurse().getElementsByClass(clef.Clef).first()
+    if isinstance(first_clef, clef.PercussionClef):
+        return True
+    name = (part.partName or part.id or "").lower()
+    return any(kw in name for kw in (
+        "percussion", "cymbal", "snare", "schellen",
+        "tamburo", "triangolo", "gran cassa", "timpani",
+    ))
+
+
 def _build_tempo_map(score: stream.Score) -> dict[int, list]:
     """全パートを走査して「小節番号 → テンポ要素リスト」のマップを作成する。
     同一小節に複数パートでテンポが書かれている場合は最初に見つかったものを使う。
@@ -246,6 +264,7 @@ def analyze_measure_activity(
         part_id = part.id or "unknown"
         part_name = part.partName or part_id
         is_hp = _is_harp_part(part)
+        is_perc = _is_percussion_part(part)
         db = _get_instrument_db(part)
 
         # 該当小節を取得
@@ -269,6 +288,7 @@ def analyze_measure_activity(
             rhythmic_resolution=rhythmic_res,
             pitch_variance=pitch_var,
             is_harp=is_hp,
+            is_percussion=is_perc,
             instrument_db=db,
         ))
 
@@ -356,15 +376,21 @@ def compress_score(
         )
 
         # 上位N個を選定
-        # 優先順位: ① 非ハープ → ② ハープ（①が0の時のみ）
-        # ハープは他パートに音がまったくない小節でのみ採用する
+        # 優先順位:
+        #   ① 非打楽器・非ハープ（最優先）
+        #   ② ハープ（①が0の時のみ採用）
+        #   ③ 打楽器（①②どちらも0の時のみ採用）
+        # 打楽器とハープは pymatchmaker のマッチングに寄与しにくいため極力除外する
         active_parts = [a for a in activities if a.note_count > 0]
-        non_harp = [a for a in active_parts if not a.is_harp]
-        harp     = [a for a in active_parts if a.is_harp]
-        if non_harp:
-            selected = non_harp[:top_n]
-        else:
+        primary = [a for a in active_parts if not a.is_harp and not a.is_percussion]
+        harp    = [a for a in active_parts if a.is_harp and not a.is_percussion]
+        perc    = [a for a in active_parts if a.is_percussion]
+        if primary:
+            selected = primary[:top_n]
+        elif harp:
             selected = harp[:top_n]
+        else:
+            selected = perc[:top_n]
 
         if verbose and m_num <= 5:  # 最初の5小節だけ詳細表示
             print(f"\n小節 {m_num}:")
