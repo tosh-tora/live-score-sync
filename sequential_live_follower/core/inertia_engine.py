@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 # transient noise) is not enough to unlock inertia extrapolation.
 _CONFIDENT_FRAMES_TO_LOCK_IN = 3
 
+# Per-iteration heartbeat logs spam at the state-sync rate (20 Hz); the
+# engine instead only logs on state transitions plus a periodic heartbeat
+# at this interval (seconds) for diagnostics.
+_HEARTBEAT_INTERVAL_SEC = 5.0
+
+# Internal state labels used to decide when to emit a transition log.
+_STATE_WAITING = "waiting"
+_STATE_TRACKING = "tracking"
+_STATE_INERTIA = "inertia"
+
 
 class InertiaEngine:
     """
@@ -59,6 +69,11 @@ class InertiaEngine:
         # several consecutive confident frames (see _CONFIDENT_FRAMES_TO_LOCK_IN).
         self._has_ever_matched = False
         self._confident_streak = 0
+
+        # Bookkeeping for noise-free logging: only emit on state changes
+        # plus an occasional heartbeat so the DEBUG stream stays readable.
+        self._last_state: str = _STATE_WAITING
+        self._last_heartbeat_time: float = 0.0
 
     def update(
         self,
@@ -108,11 +123,11 @@ class InertiaEngine:
                     self._confident_streak, current_beat, self.last_tempo_bpm,
                 )
 
-            logger.debug(
-                f"High confidence ({confidence:.2f}): using matcher beat {current_beat:.1f}, "
-                f"tempo {self.last_tempo_bpm:.1f} BPM, streak={self._confident_streak}"
+            self._log_state(
+                _STATE_TRACKING, now, confidence,
+                f"beat={current_beat:.1f}, tempo={self.last_tempo_bpm:.1f} BPM, "
+                f"streak={self._confident_streak}",
             )
-
             return current_beat, False, self.last_tempo_bpm
 
         else:
@@ -124,8 +139,9 @@ class InertiaEngine:
             # before any music is detected.
             if not self._has_ever_matched:
                 self.inertia_active = False
-                logger.debug(
-                    f"Low confidence ({confidence:.2f}): waiting for tracking lock-in, holding beat 0"
+                self._log_state(
+                    _STATE_WAITING, now, confidence,
+                    "holding beat 0 until tracking locks in",
                 )
                 return 0.0, False, self.last_tempo_bpm
 
@@ -144,6 +160,8 @@ class InertiaEngine:
                 self._has_ever_matched = False
                 self._confident_streak = 0
                 self.inertia_active = False
+                self._last_state = _STATE_WAITING
+                self._last_heartbeat_time = now
                 # Hold tempo so a future lock-in starts with the previous
                 # tempo as its initial guess.
                 return 0.0, False, self.last_tempo_bpm
@@ -155,12 +173,37 @@ class InertiaEngine:
 
             self.inertia_active = True
 
-            logger.debug(
-                f"Low confidence ({confidence:.2f}): inertia beat {inertia_beat:.1f} "
-                f"(δt={delta_time:.2f}s, tempo={self.last_tempo_bpm:.1f} BPM)"
+            self._log_state(
+                _STATE_INERTIA, now, confidence,
+                f"inertia beat={inertia_beat:.1f}, δt={delta_time:.2f}s, "
+                f"tempo={self.last_tempo_bpm:.1f} BPM",
             )
-
             return inertia_beat, True, self.last_tempo_bpm
+
+    def _log_state(
+        self, state: str, now: float, confidence: float, detail: str
+    ) -> None:
+        """Emit a DEBUG log only on state changes or once every heartbeat.
+
+        ``update()`` is called at the state-sync rate (20 Hz). Logging
+        every call floods ``-v`` output and makes it unreadable. We emit
+        a line on transitions (most useful) and otherwise rate-limit to
+        ``_HEARTBEAT_INTERVAL_SEC`` so the engine is still observable
+        when nothing is changing.
+        """
+        if state != self._last_state:
+            logger.debug(
+                "state %s → %s (conf=%.2f): %s",
+                self._last_state, state, confidence, detail,
+            )
+            self._last_state = state
+            self._last_heartbeat_time = now
+            return
+        if now - self._last_heartbeat_time >= _HEARTBEAT_INTERVAL_SEC:
+            logger.debug(
+                "state %s (conf=%.2f): %s", state, confidence, detail,
+            )
+            self._last_heartbeat_time = now
 
     def is_locked_in(self) -> bool:
         """Return True once tracking has clearly begun.
@@ -183,6 +226,8 @@ class InertiaEngine:
         self._has_ever_matched = False
         self._confident_streak = 0
         self.inertia_active = False
+        self._last_state = _STATE_WAITING
+        self._last_heartbeat_time = 0.0
         logger.info("Inertia tracking state reset (manual)")
 
     def reset(self):
@@ -193,6 +238,8 @@ class InertiaEngine:
         self.inertia_active = False
         self._has_ever_matched = False
         self._confident_streak = 0
+        self._last_state = _STATE_WAITING
+        self._last_heartbeat_time = 0.0
 
     def __repr__(self) -> str:
         return (
