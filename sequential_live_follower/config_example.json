@@ -2,7 +2,7 @@
   "settings": {
     "cooldown_seconds": 3.0,
     "confidence_threshold": 0.4,
-    "silence_threshold_db": -40.0,
+    "silence_threshold_db": -55.0,
     "inertia_timeout_seconds": 5.0,
     "mic_device": "pulse"
   },

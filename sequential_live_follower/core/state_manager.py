@@ -45,6 +45,12 @@ class AppState:
         self.inertia_mode: bool = False
         self.inertia_tempo_bpm: Optional[float] = None
 
+        # Live microphone level (dBFS) and whether the silence gate is
+        # currently suppressing matcher confidence.  Surfaced to the GUI
+        # so the operator can tell whether the mic is actually being heard.
+        self.mic_level_db: float = -120.0
+        self.silence_gate_active: bool = False
+
         # UI update signaling
         self.ui_update_event = threading.Event()
 
@@ -66,6 +72,8 @@ class AppState:
                 'cooldown_active': self.cooldown_active,
                 'next_trigger_measure': self.next_trigger_measure,
                 'last_trigger_measure': self.last_trigger_measure,
+                'mic_level_db': self.mic_level_db,
+                'silence_gate_active': self.silence_gate_active,
             }
 
     def update_beat_measure(self, beat: float, measure: int):
@@ -128,6 +136,19 @@ class AppState:
             self.inertia_mode = active
             if tempo_bpm is not None:
                 self.inertia_tempo_bpm = tempo_bpm
+        self.ui_update_event.set()
+
+    def set_mic_level(self, level_db: float, gate_active: bool):
+        """Update mic level (dBFS) and silence-gate state.
+
+        Args:
+            level_db: Current mic RMS level in dBFS.
+            gate_active: True if the silence gate is currently forcing
+                matcher confidence to 0 (i.e. level_db <= threshold).
+        """
+        with self._lock:
+            self.mic_level_db = level_db
+            self.silence_gate_active = gate_active
         self.ui_update_event.set()
 
     def set_next_trigger(self, measure_num: Optional[int]):

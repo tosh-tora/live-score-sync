@@ -262,7 +262,9 @@ class SequentialFollower:
                 # its score-prior even when the mic is dead silent.  Force
                 # confidence to 0 in that case so the InertiaEngine cannot
                 # falsely lock in tracking.
-                if not self.audio_monitor.is_active():
+                mic_level_db = self.audio_monitor.get_level_db()
+                gate_active = not self.audio_monitor.is_active()
+                if gate_active:
                     raw_conf = 0.0
 
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
@@ -271,6 +273,7 @@ class SequentialFollower:
                 self.state.update_beat_measure(beat, measure)
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
+                self.state.set_mic_level(mic_level_db, gate_active)
 
             except Exception as exc:  # noqa: BLE001 — keep the thread alive
                 logger.error("State-sync error: %s", exc, exc_info=True)
