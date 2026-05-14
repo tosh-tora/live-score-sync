@@ -39,6 +39,12 @@ class InertiaEngine:
 
         self.inertia_active = False
 
+        # Guard: do not extrapolate until at least one confident match is
+        # received.  Without this flag the engine would immediately start
+        # advancing at 120 BPM from t=0, causing slides to fire before any
+        # music is detected.
+        self._has_ever_matched = False
+
     def update(
         self,
         current_beat: float,
@@ -60,8 +66,9 @@ class InertiaEngine:
             # High confidence: trust matcher
             delta_time = now - self.last_confident_time
 
-            if delta_time > 0.0:
-                # Estimate tempo from beat jump
+            if delta_time > 0.0 and self._has_ever_matched:
+                # Estimate tempo from beat jump (only after the first match so
+                # we have a meaningful previous position to compare against).
                 delta_beat = current_beat - self.last_confident_beat
                 # Convert beat/sec to BPM (assumes beat = quarter note)
                 self.last_tempo_bpm = (delta_beat / delta_time) * 60.0
@@ -69,6 +76,7 @@ class InertiaEngine:
             self.last_confident_beat = current_beat
             self.last_confident_time = now
             self.inertia_active = False
+            self._has_ever_matched = True
 
             logger.debug(
                 f"High confidence ({confidence:.2f}): using matcher beat {current_beat:.1f}, "
@@ -78,7 +86,16 @@ class InertiaEngine:
             return current_beat, False, self.last_tempo_bpm
 
         else:
-            # Low confidence: use inertia
+            # Low confidence: use inertia — but only if tracking has started.
+            # Before the first confident match we hold position at beat 0 so
+            # that slides do not fire before any music is detected.
+            if not self._has_ever_matched:
+                self.inertia_active = False
+                logger.debug(
+                    f"Low confidence ({confidence:.2f}): waiting for first match, holding beat 0"
+                )
+                return 0.0, False, self.last_tempo_bpm
+
             delta_time = now - self.last_confident_time
 
             # Extrapolate: new_beat = last_beat + tempo * delta_time
@@ -101,6 +118,7 @@ class InertiaEngine:
         self.last_confident_time = time.time()
         self.last_tempo_bpm = 120.0
         self.inertia_active = False
+        self._has_ever_matched = False
 
     def __repr__(self) -> str:
         return (
