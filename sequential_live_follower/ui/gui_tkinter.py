@@ -38,6 +38,22 @@ _PREFERRED_FONT_FAMILIES = (
     "DejaVu Sans",
 )
 
+# Font sizes were originally tuned for a 900x500 window with ~12pt body text.
+# Bumped to ~2x so the operator can read the GUI from across the pit.
+_TITLE_FONT_SIZE = 28
+_FILE_FONT_SIZE = 32
+_MEASURE_FONT_SIZE = 140
+_CONFIDENCE_FONT_SIZE = 24
+_TRIGGER_FONT_SIZE = 28
+_INERTIA_FONT_SIZE = 24
+_COOLDOWN_FONT_SIZE = 22
+_HINT_FONT_SIZE = 18
+
+# Window + confidence bar geometry, also scaled ~2x to match the new fonts.
+_WINDOW_GEOMETRY = "1400x800"
+_BAR_WIDTH = 400
+_BAR_HEIGHT = 36
+
 
 def _pick_font_family(root: tk.Tk) -> str:
     """Return the first available CJK-capable font family for this Tk root."""
@@ -76,7 +92,7 @@ class FollowerGUI:
         self.state = state
 
         self.root.title("Sequential Live Follower")
-        self.root.geometry("900x500")
+        self.root.geometry(_WINDOW_GEOMETRY)
         self.root.configure(bg="#f0f0f0")
 
         # Pick a font family that can actually render Japanese.  The previous
@@ -97,21 +113,21 @@ class FollowerGUI:
         family = self._font_family
 
         # Title
-        title_font = font.Font(family=family, size=14, weight="bold")
+        title_font = font.Font(family=family, size=_TITLE_FONT_SIZE, weight="bold")
         title_label = tk.Label(
             self.root, text="Sequential Live Follower", font=title_font, bg="#f0f0f0"
         )
         title_label.pack(pady=10)
 
         # File name (large font)
-        file_font = font.Font(family=family, size=16, weight="bold")
+        file_font = font.Font(family=family, size=_FILE_FONT_SIZE, weight="bold")
         self.label_file = tk.Label(
             self.root, text="[No file loaded]", font=file_font, bg="#f0f0f0", fg="#333"
         )
         self.label_file.pack(pady=10)
 
         # Current measure (very large)
-        measure_font = font.Font(family=family, size=72, weight="bold")
+        measure_font = font.Font(family=family, size=_MEASURE_FONT_SIZE, weight="bold")
         self.label_measure = tk.Label(
             self.root,
             text="--",
@@ -125,22 +141,24 @@ class FollowerGUI:
         conf_frame = tk.Frame(self.root, bg="#f0f0f0")
         conf_frame.pack(pady=15)
 
-        conf_label = tk.Label(conf_frame, text="Confidence:", font=(family, 12), bg="#f0f0f0")
+        conf_label = tk.Label(
+            conf_frame, text="Confidence:", font=(family, _CONFIDENCE_FONT_SIZE), bg="#f0f0f0"
+        )
         conf_label.pack(side=tk.LEFT, padx=10)
 
         self.label_confidence = tk.Label(
-            conf_frame, text="-- (--)", font=(family, 12), bg="#f0f0f0", fg="gray"
+            conf_frame, text="-- (--)", font=(family, _CONFIDENCE_FONT_SIZE), bg="#f0f0f0", fg="gray"
         )
         self.label_confidence.pack(side=tk.LEFT, padx=10)
 
         # Progress bar (simple visual representation)
         self.canvas_confidence = tk.Canvas(
-            conf_frame, width=200, height=20, bg="white", highlightthickness=1
+            conf_frame, width=_BAR_WIDTH, height=_BAR_HEIGHT, bg="white", highlightthickness=1
         )
         self.canvas_confidence.pack(side=tk.LEFT, padx=10)
 
         # Next trigger measure
-        trigger_font = font.Font(family=family, size=14)
+        trigger_font = font.Font(family=family, size=_TRIGGER_FONT_SIZE)
         self.label_next_trigger = tk.Label(
             self.root,
             text="Next trigger: --",
@@ -152,13 +170,13 @@ class FollowerGUI:
 
         # Inertia mode indicator
         self.label_inertia = tk.Label(
-            self.root, text="", font=(family, 12, "bold"), bg="#f0f0f0", fg="red"
+            self.root, text="", font=(family, _INERTIA_FONT_SIZE, "bold"), bg="#f0f0f0", fg="red"
         )
         self.label_inertia.pack(pady=5)
 
         # Cooldown indicator
         self.label_cooldown = tk.Label(
-            self.root, text="", font=(family, 11), bg="#f0f0f0", fg="orange"
+            self.root, text="", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="orange"
         )
         self.label_cooldown.pack(pady=2)
 
@@ -169,7 +187,7 @@ class FollowerGUI:
                 "→/Space: スライドを進める   ←: スライドを戻す   "
                 "N: 次の楽章   R: 追従状態をリセット"
             ),
-            font=(family, 10),
+            font=(family, _HINT_FONT_SIZE),
             bg="#f0f0f0",
             fg="#888",
         )
@@ -206,8 +224,10 @@ class FollowerGUI:
 
             # Confidence bar
             self.canvas_confidence.delete("all")
-            bar_width = 200 * conf
-            self.canvas_confidence.create_rectangle(0, 0, bar_width, 20, fill=color, outline="black")
+            bar_width = _BAR_WIDTH * conf
+            self.canvas_confidence.create_rectangle(
+                0, 0, bar_width, _BAR_HEIGHT, fill=color, outline="black"
+            )
 
             # Next trigger
             next_trig = state['next_trigger_measure']
