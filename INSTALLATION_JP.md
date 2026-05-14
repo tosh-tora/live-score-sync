@@ -181,6 +181,7 @@ https://docs.google.com/presentation/d/<PRESENTATION_ID>/present?slide=id.p
 | Chromium 起動でクラッシュ | `playwright install chromium` 未実行 | venv 有効化済みで `playwright install chromium` |
 | トリガー時にスライドが進まない | Chromium がフォーカスを失っている / プレゼンモードでない | Chromium ウィンドウをクリック → F11 でフルスクリーンに |
 | 信頼度が常に低い | マイクゲイン低 / 楽器配置と離れている | 入力ゲインを上げる、`config.json` の `confidence_threshold` を下げる |
+| sounddevice の `default` デバイスが完全無音 (-98 dBFS) | WSL2 の ALSA `default` が PulseAudio に届いていない | `config.json` の `settings.mic_device` を `"pulse"` (デフォルト) のままにする。`~/.asoundrc` だけでは sounddevice が pulse 経由にならない環境がある |
 
 ---
 

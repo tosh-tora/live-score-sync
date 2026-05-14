@@ -69,9 +69,11 @@ class SequentialFollower:
         self.cooldown = CooldownTimer(self.config.get_cooldown_seconds())
         # Live mic level monitor — when the mic is silent, force matcher
         # confidence to 0 so pymatchmaker's score-driven advance cannot
-        # falsely lock in the InertiaEngine.
+        # falsely lock in the InertiaEngine.  Must consume the same input
+        # device as MatchMaker (see ConfigLoader.get_mic_device).
         self.audio_monitor = AudioLevelMonitor(
             threshold_db=self.config.get_silence_threshold_db(),
+            device=self.config.get_mic_device(),
         )
 
         # Per-movement objects (recreated each load)
@@ -202,7 +204,11 @@ class SequentialFollower:
             return
 
         try:
-            self.matcher = MatchMaker(score_file=xml_file, input_type="audio")
+            self.matcher = MatchMaker(
+                score_file=xml_file,
+                input_type="audio",
+                device_name_or_index=self.config.get_mic_device(),
+            )
             self.matcher.start()
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to start matcher: %s", exc, exc_info=True)
