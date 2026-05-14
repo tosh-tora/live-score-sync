@@ -33,6 +33,7 @@ import tkinter as tk
 from pathlib import Path
 
 from sequential_live_follower.config.loader import ConfigLoader
+from sequential_live_follower.core.audio_level import AudioLevelMonitor
 from sequential_live_follower.core.cooldown_timer import CooldownTimer
 from sequential_live_follower.core.inertia_engine import InertiaEngine
 from sequential_live_follower.core.matcher import MatchMaker
@@ -61,12 +62,26 @@ class SequentialFollower:
 
         # Shared state and per-instance helpers
         self.state = AppState()
-        self.inertia = InertiaEngine(self.config.get_confidence_threshold())
+        self.inertia = InertiaEngine(
+            confidence_threshold=self.config.get_confidence_threshold(),
+            inertia_timeout_sec=self.config.get_inertia_timeout_seconds(),
+        )
         self.cooldown = CooldownTimer(self.config.get_cooldown_seconds())
+        # Live mic level monitor — when the mic is silent, force matcher
+        # confidence to 0 so pymatchmaker's score-driven advance cannot
+        # falsely lock in the InertiaEngine.
+        self.audio_monitor = AudioLevelMonitor(
+            threshold_db=self.config.get_silence_threshold_db(),
+        )
 
         # Per-movement objects (recreated each load)
         self.score_mapper: ScoreMapper | None = None
         self.matcher: MatchMaker | None = None
+
+        # Trigger measures already fired in the current movement. Each
+        # trigger fires at most once per movement load; this set is cleared
+        # whenever a new movement is loaded.
+        self._fired_trigger_measures: set[int] = set()
 
         # Long-lived browser controller (lives across movements)
         self.slide_controller = SlideController(slide_url=slide_url)
@@ -85,6 +100,9 @@ class SequentialFollower:
     # ----------------------------------------------------- lifecycle
     def run(self) -> None:
         """Start everything, then run the Tk main loop until the window closes."""
+        logger.info("Launching AudioLevelMonitor …")
+        self.audio_monitor.start()
+
         logger.info("Launching SlideController …")
         self.slide_controller.start()
         if not self.slide_controller.wait_ready(timeout=30.0):
@@ -135,6 +153,7 @@ class SequentialFollower:
             self.matcher.stop()
             self.matcher = None
 
+        self.audio_monitor.stop()
         self.slide_controller.stop()
         logger.info("Shutdown complete")
 
@@ -193,6 +212,7 @@ class SequentialFollower:
         # Reset cross-movement helpers
         self.inertia.reset()
         self.cooldown.cleanup_old()
+        self._fired_trigger_measures.clear()
 
         triggers = movement.get("triggers", [])
         self.state.set_movement(
@@ -231,6 +251,14 @@ class SequentialFollower:
                     continue
 
                 raw_beat, raw_conf = matcher.get_latest()
+
+                # Silence gate: pymatchmaker keeps advancing the beat from
+                # its score-prior even when the mic is dead silent.  Force
+                # confidence to 0 in that case so the InertiaEngine cannot
+                # falsely lock in tracking.
+                if not self.audio_monitor.is_active():
+                    raw_conf = 0.0
+
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
 
@@ -260,9 +288,22 @@ class SequentialFollower:
                     time.sleep(interval)
                     continue
 
-                # Update "next trigger" display
-                upcoming = [t["measure"] for t in triggers if t["measure"] > current_measure]
+                # Update "next trigger" display: only show measures we
+                # haven't fired yet, so the operator sees the *real* next
+                # cue rather than one that's already played.
+                upcoming = [
+                    t["measure"] for t in triggers
+                    if t["measure"] > current_measure
+                    and t["measure"] not in self._fired_trigger_measures
+                ]
                 self.state.set_next_trigger(min(upcoming) if upcoming else None)
+
+                # Do not fire anything until tracking has clearly begun.
+                # Otherwise the measure=1 trigger fires at startup (beat=0
+                # maps to measure 1) before any music is detected.
+                if not self.inertia.is_locked_in():
+                    time.sleep(interval)
+                    continue
 
                 # Fire any trigger whose measure has been reached and isn't
                 # in cooldown.
@@ -272,6 +313,9 @@ class SequentialFollower:
 
                 for trig in triggers:
                     if trig["measure"] != current_measure:
+                        continue
+                    # Each trigger fires at most once per movement load.
+                    if current_measure in self._fired_trigger_measures:
                         continue
                     if not self.cooldown.should_trigger(current_measure):
                         continue
@@ -285,6 +329,7 @@ class SequentialFollower:
                     )
                     self.cooldown.mark_triggered(current_measure)
                     self.state.activate_cooldown(self.config.get_cooldown_seconds())
+                    self._fired_trigger_measures.add(current_measure)
                     break  # one trigger per measure visit
 
             except Exception as exc:  # noqa: BLE001
@@ -303,19 +348,48 @@ class SequentialFollower:
 
     # ---------------------------------------------------- keyboard bindings
     def _bind_keys(self) -> None:
-        """Bind 'N' (next) to the Tk root window.
+        """Bind operator hotkeys to the Tk root window.
 
         Bindings are scoped to the operator GUI window. The operator screen
         must have focus for the key to register — this is intentional so the
         audience-facing Chromium window does not steal the binding.
+
+        Hotkeys:
+            N       : load next movement
+            R       : reset tracking state
+            → / Space : manually advance one slide
+            ←       : manually go back one slide
         """
         def _on_n(_event: tk.Event) -> None:
             logger.info("'N' key pressed → loading next movement")
             self._load_next_movement()
 
+        def _on_r(_event: tk.Event) -> None:
+            logger.info("'R' key pressed → resetting tracking state")
+            self.inertia.reset_tracking()
+            # Also clear fired triggers so the operator can re-fire from
+            # the top after a manual reset.
+            self._fired_trigger_measures.clear()
+
+        def _on_slide_next(_event: tk.Event) -> None:
+            logger.info("Manual slide advance (→/Space)")
+            self._execute_action("right")
+
+        def _on_slide_prev(_event: tk.Event) -> None:
+            logger.info("Manual slide back (←)")
+            self._execute_action("left")
+
         self.root.bind("<KeyPress-n>", _on_n)
         self.root.bind("<KeyPress-N>", _on_n)
-        logger.info("'N' key bound to next-movement on operator GUI")
+        self.root.bind("<KeyPress-r>", _on_r)
+        self.root.bind("<KeyPress-R>", _on_r)
+        self.root.bind("<KeyPress-Right>", _on_slide_next)
+        self.root.bind("<KeyPress-space>", _on_slide_next)
+        self.root.bind("<KeyPress-Left>", _on_slide_prev)
+        logger.info(
+            "Operator hotkeys bound: N=next movement, R=reset tracking, "
+            "→/Space=manual next slide, ←=manual previous slide"
+        )
 
 
 def main() -> int:

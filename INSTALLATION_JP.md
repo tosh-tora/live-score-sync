@@ -54,10 +54,11 @@ sudo apt install -y \
     fluidsynth libfluidsynth-dev \
     portaudio19-dev \
     libnss3 libatk-bridge2.0-0 libcups2 libgtk-3-0 libgbm1 libasound2t64 \
+    fonts-noto-cjk \
     git
 ```
 
-> `python3-tk` は操作 GUI (Tkinter) の表示に必要、`libnss3` 以降は Playwright が起動する Chromium の依存です。
+> `python3-tk` は操作 GUI (Tkinter) の表示に必要、`libnss3` 以降は Playwright が起動する Chromium の依存、`fonts-noto-cjk` は操作 GUI で日本語ファイル名・ラベルを豆腐化させないために必要です。
 
 ### 3. プロジェクトの取得と Python 環境構築
 
