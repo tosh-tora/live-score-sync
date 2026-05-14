@@ -74,16 +74,44 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 4. マイク確認
+### 4. ALSA → PulseAudio ブリッジの設定
+
+WSL2 では PortAudio (sounddevice) が直接 ALSA ハードウェアにアクセスできません。PulseAudio 経由でルーティングするブリッジを設定します。
 
 ```bash
-# 5 秒録音 → 再生テスト
-arecord -d 5 -f cd test.wav && aplay test.wav
+# ALSA の PulseAudio プラグインをインストール
+sudo apt install -y libasound2-plugins pulseaudio
+
+# ALSA のデフォルトデバイスを PulseAudio に向ける
+cat > ~/.asoundrc << 'EOF'
+pcm.default pulse
+ctl.default pulse
+pcm.pulse {
+    type pulse
+}
+ctl.pulse {
+    type pulse
+}
+EOF
 ```
 
-問題なく自分の声が録音できれば WSLg のオーディオパススルーは動いています。
+設定後、sounddevice からデバイスが見えることを確認：
 
-### 5. 動作確認 (smoke test)
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+# → "pulse" と "default" が表示されれば OK
+```
+
+### 5. マイク確認
+
+```bash
+# sounddevice 経由でデバイス一覧を確認 (pymatchmaker が使うバックエンド)
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+> **注意**: `arecord` コマンドは WSL2 の ALSA ハードウェアが存在しないためエラーになりますが、sounddevice にデバイスが表示されれば問題ありません。
+
+### 6. 動作確認 (smoke test)
 
 ```bash
 # pymatchmaker / partitura / Playwright のインポート
