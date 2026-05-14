@@ -137,6 +137,16 @@ class InertiaEngine:
 
             return inertia_beat, True, self.last_tempo_bpm
 
+    def is_locked_in(self) -> bool:
+        """Return True once tracking has clearly begun.
+
+        Trigger executors should refuse to fire while this is False so that
+        slides do not advance before any music is detected (e.g. the
+        measure=1 trigger would otherwise fire at startup because beat=0
+        maps to measure 1).
+        """
+        return self._has_ever_matched
+
     def reset(self):
         """Reset inertia engine (for movement changes)."""
         self.last_confident_beat = 0.0

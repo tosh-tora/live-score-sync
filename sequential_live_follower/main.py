@@ -68,6 +68,11 @@ class SequentialFollower:
         self.score_mapper: ScoreMapper | None = None
         self.matcher: MatchMaker | None = None
 
+        # Trigger measures already fired in the current movement. Each
+        # trigger fires at most once per movement load; this set is cleared
+        # whenever a new movement is loaded.
+        self._fired_trigger_measures: set[int] = set()
+
         # Long-lived browser controller (lives across movements)
         self.slide_controller = SlideController(slide_url=slide_url)
 
@@ -193,6 +198,7 @@ class SequentialFollower:
         # Reset cross-movement helpers
         self.inertia.reset()
         self.cooldown.cleanup_old()
+        self._fired_trigger_measures.clear()
 
         triggers = movement.get("triggers", [])
         self.state.set_movement(
@@ -260,9 +266,22 @@ class SequentialFollower:
                     time.sleep(interval)
                     continue
 
-                # Update "next trigger" display
-                upcoming = [t["measure"] for t in triggers if t["measure"] > current_measure]
+                # Update "next trigger" display: only show measures we
+                # haven't fired yet, so the operator sees the *real* next
+                # cue rather than one that's already played.
+                upcoming = [
+                    t["measure"] for t in triggers
+                    if t["measure"] > current_measure
+                    and t["measure"] not in self._fired_trigger_measures
+                ]
                 self.state.set_next_trigger(min(upcoming) if upcoming else None)
+
+                # Do not fire anything until tracking has clearly begun.
+                # Otherwise the measure=1 trigger fires at startup (beat=0
+                # maps to measure 1) before any music is detected.
+                if not self.inertia.is_locked_in():
+                    time.sleep(interval)
+                    continue
 
                 # Fire any trigger whose measure has been reached and isn't
                 # in cooldown.
@@ -272,6 +291,9 @@ class SequentialFollower:
 
                 for trig in triggers:
                     if trig["measure"] != current_measure:
+                        continue
+                    # Each trigger fires at most once per movement load.
+                    if current_measure in self._fired_trigger_measures:
                         continue
                     if not self.cooldown.should_trigger(current_measure):
                         continue
@@ -285,6 +307,7 @@ class SequentialFollower:
                     )
                     self.cooldown.mark_triggered(current_measure)
                     self.state.activate_cooldown(self.config.get_cooldown_seconds())
+                    self._fired_trigger_measures.add(current_measure)
                     break  # one trigger per measure visit
 
             except Exception as exc:  # noqa: BLE001
