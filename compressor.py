@@ -169,25 +169,30 @@ def calculate_pitch_variance(measure: stream.Measure) -> float:
 # 楽器ごとの代表音量 (dB) — Scribd「Noise Levels in DB for Orchestral Instruments」より各レンジの上限値
 # 同スコアタイ時の優先順位決定に使用する
 # 判定はリスト上から順に最初にマッチしたものを採用するため、
-# より具体的なキーワード（trombone / contrabass / cornetti 等）を上に配置する
+# より具体的なキーワードを上に配置する。
+# 例) "Tamburo piccolo"(小太鼓) を "piccolo"(笛) と取り違えないよう打楽器を先に置く
 _INSTRUMENT_DB_TABLE: tuple[tuple[tuple[str, ...], float], ...] = (
+    # 打楽器（"tamburo piccolo" などを Piccolo より先に判定）
+    (("percussion", "cymbal", "snare", "schellen", "tamburo",
+      "triangolo", "gran cassa"),                                   105.0),
+    (("timpani",),                                                   94.0),
+    # 木管・金管
     (("piccolo",),                                                  112.0),
     (("trombone", "tromboni"),                                      106.0),
     (("trumpet", "tromba", "trombe", "cornet", "cornetti"),         108.0),
     (("flute", "flauto", "flauti"),                                 105.0),
-    (("percussion", "cymbal", "snare", "schellen", "tamburo",
-      "triangolo", "gran cassa"),                                   105.0),
     (("horn", "corno", "corni"),                                    104.0),
-    (("cello", "violoncel"),                                        104.0),
     (("oboe", "oboi"),                                              102.0),
     (("tuba",),                                                     100.0),
     (("organ", "organo"),                                           100.0),
     (("contrafagot", "contra-fagot", "contrabasso",
       "contrabass", "bassi", "double bass"),                         94.0),
-    (("timpani",),                                                   94.0),
     (("bassoon", "fagott", "fagotti"),                               90.0),
+    # 弦・ハープ
+    (("cello", "violoncel"),                                        104.0),
     (("violin", "violini", "viola", "viole"),                        90.0),
     (("harp", "arpa", "harpe"),                                      90.0),
+    # クラリネット
     (("clarinet", "clarinetti", "clarinetto"),                       82.0),
 )
 
