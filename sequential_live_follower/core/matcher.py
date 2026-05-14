@@ -41,6 +41,14 @@ _CONFIDENCE_WINDOW_SEC = 2.0
 _CV_TO_ZERO_CONFIDENCE = 0.5
 # If beat hasn't advanced for this long, force confidence to 0
 _STALL_TIMEOUT_SEC = 1.0
+# Minimum number of beat samples before any positive confidence is reported.
+# Below this threshold confidence is forced to 0.0 so the inertia engine does
+# not falsely conclude that tracking has begun during the matcher's warmup.
+_MIN_HISTORY_FOR_CONFIDENCE = 5
+# Minimum beat-velocity (beats/sec) to count as real tracking. 0.5 beats/sec
+# corresponds to 30 BPM — slower than any practical orchestral tempo. Velocity
+# below this is treated as drift / noise floor and reported as 0 confidence.
+_MIN_VELOCITY_FOR_CONFIDENCE = 0.5
 
 
 class MatchMaker:
@@ -272,10 +280,18 @@ class MatchMaker:
             self._ready_event.set()
 
     def _estimate_confidence_locked(self) -> float:
-        """Compute confidence from recent beat history. Caller holds the lock."""
+        """Compute confidence from recent beat history. Caller holds the lock.
+
+        Returns 0.0 (not a "neutral" 0.5) until we have enough data to make
+        a real judgement.  Returning 0.5 here would briefly exceed the
+        default inertia threshold (0.4) during the first 1-2 matchmaker
+        emissions, falsely signalling that tracking has begun — which then
+        unlocks inertia extrapolation at 120 BPM even when no audio is
+        actually present.
+        """
         history = self._beat_history
-        if len(history) < 3:
-            return 0.5  # not enough data yet — neutral
+        if len(history) < _MIN_HISTORY_FOR_CONFIDENCE:
+            return 0.0
 
         velocities = []
         for i in range(1, len(history)):
@@ -289,8 +305,10 @@ class MatchMaker:
             return 0.0
 
         v_mean = statistics.fmean(velocities)
-        if v_mean <= 0:
-            # Beat not progressing (stalled or moving backward) → no confidence
+        # Reject non-positive velocity (stalled/backward) AND extremely slow
+        # drift that looks like noise rather than music. 0.5 beats/sec = 30 BPM,
+        # which is below any practical orchestral tempo.
+        if v_mean < _MIN_VELOCITY_FOR_CONFIDENCE:
             return 0.0
 
         v_std = statistics.pstdev(velocities) if len(velocities) > 1 else 0.0
