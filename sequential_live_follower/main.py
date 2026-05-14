@@ -348,11 +348,17 @@ class SequentialFollower:
 
     # ---------------------------------------------------- keyboard bindings
     def _bind_keys(self) -> None:
-        """Bind 'N' (next movement) and 'R' (reset tracking) to the Tk root window.
+        """Bind operator hotkeys to the Tk root window.
 
         Bindings are scoped to the operator GUI window. The operator screen
         must have focus for the key to register — this is intentional so the
         audience-facing Chromium window does not steal the binding.
+
+        Hotkeys:
+            N       : load next movement
+            R       : reset tracking state
+            → / Space : manually advance one slide
+            ←       : manually go back one slide
         """
         def _on_n(_event: tk.Event) -> None:
             logger.info("'N' key pressed → loading next movement")
@@ -365,11 +371,25 @@ class SequentialFollower:
             # the top after a manual reset.
             self._fired_trigger_measures.clear()
 
+        def _on_slide_next(_event: tk.Event) -> None:
+            logger.info("Manual slide advance (→/Space)")
+            self._execute_action("right")
+
+        def _on_slide_prev(_event: tk.Event) -> None:
+            logger.info("Manual slide back (←)")
+            self._execute_action("left")
+
         self.root.bind("<KeyPress-n>", _on_n)
         self.root.bind("<KeyPress-N>", _on_n)
         self.root.bind("<KeyPress-r>", _on_r)
         self.root.bind("<KeyPress-R>", _on_r)
-        logger.info("'N' (next movement) and 'R' (reset tracking) bound to operator GUI")
+        self.root.bind("<KeyPress-Right>", _on_slide_next)
+        self.root.bind("<KeyPress-space>", _on_slide_next)
+        self.root.bind("<KeyPress-Left>", _on_slide_prev)
+        logger.info(
+            "Operator hotkeys bound: N=next movement, R=reset tracking, "
+            "→/Space=manual next slide, ←=manual previous slide"
+        )
 
 
 def main() -> int:

@@ -165,7 +165,10 @@ class FollowerGUI:
         # Key hints (always visible at the bottom)
         self.label_hints = tk.Label(
             self.root,
-            text="N: 次の楽章   R: 追従状態をリセット",
+            text=(
+                "→/Space: スライドを進める   ←: スライドを戻す   "
+                "N: 次の楽章   R: 追従状態をリセット"
+            ),
             font=(family, 10),
             bg="#f0f0f0",
             fg="#888",
