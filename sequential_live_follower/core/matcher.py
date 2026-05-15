@@ -11,14 +11,20 @@ Design notes
 The public `matchmaker` API yields a single `current_position` (in beats) per
 audio frame; it does not surface a confidence value as of pymatchmaker 0.2.1.
 To keep the existing InertiaEngine semantics (which expects a confidence in
-[0, 1]), we approximate confidence from the stability of beat progression:
+[0, 1]), we approximate confidence from beat advancement over a sliding window:
 
-- "Healthy" tracking: beat advances at a roughly constant velocity.
-- "Lost" tracking: beat stalls, jumps backward, or oscillates wildly.
+- "Healthy" tracking: beat advances by at least _MIN_VELOCITY_FOR_CONFIDENCE
+  beats/sec when measured over the full _CONFIDENCE_WINDOW_SEC window.
+- "Lost" tracking: beat stalls or the window is still filling.
 
-We measure this with the coefficient of variation (std/mean) of recent beat
-velocities. Low CV → high confidence; high CV or non-positive velocity → low
-confidence.
+We deliberately avoid per-frame velocity metrics because pymatchmaker processes
+audio in bursts (racing through buffered frames, then blocking on I/O), which
+causes huge per-sample variance even during correct tracking.  Total advancement
+over the whole window is invariant to burst shape.
+
+The silence gate (AudioLevelMonitor) handles false positives when no music is
+playing.  A binary 0.0/1.0 output is intentional — gradual confidence ramp-up
+is the InertiaEngine's job (consecutive-lock-in counter).
 
 If a future pymatchmaker release exposes a real confidence/cost value, this
 module is the single place that needs to change.
@@ -27,7 +33,6 @@ module is the single place that needs to change.
 from __future__ import annotations
 
 import logging
-import statistics
 import threading
 import time
 from collections import deque
@@ -37,17 +42,14 @@ logger = logging.getLogger(__name__)
 
 # Confidence estimation window (seconds of recent beat history we track)
 _CONFIDENCE_WINDOW_SEC = 2.0
-# Coefficient of variation above this maps to confidence = 0
-_CV_TO_ZERO_CONFIDENCE = 0.5
 # If beat hasn't advanced for this long, force confidence to 0
 _STALL_TIMEOUT_SEC = 1.0
 # Minimum number of beat samples before any positive confidence is reported.
 # Below this threshold confidence is forced to 0.0 so the inertia engine does
 # not falsely conclude that tracking has begun during the matcher's warmup.
 _MIN_HISTORY_FOR_CONFIDENCE = 5
-# Minimum beat-velocity (beats/sec) to count as real tracking. 0.5 beats/sec
-# corresponds to 30 BPM — slower than any practical orchestral tempo. Velocity
-# below this is treated as drift / noise floor and reported as 0 confidence.
+# Minimum average beat-velocity (beats/sec) over the window to count as real
+# tracking. 0.5 beats/sec ≈ 30 BPM — slower than any practical orchestral tempo.
 _MIN_VELOCITY_FOR_CONFIDENCE = 0.5
 
 
@@ -275,6 +277,9 @@ class MatchMaker:
                 self._beat_history.popleft()
 
             self._latest_confidence = self._estimate_confidence_locked()
+            confidence = self._latest_confidence  # capture before releasing lock
+
+        logger.debug("beat=%.3f conf=%.2f", beat, confidence)
 
         if not self._ready_event.is_set():
             self._ready_event.set()
@@ -288,34 +293,30 @@ class MatchMaker:
         emissions, falsely signalling that tracking has begun — which then
         unlocks inertia extrapolation at 120 BPM even when no audio is
         actually present.
+
+        We use total beat advancement over the full window (endpoint delta /
+        elapsed time) rather than per-frame velocity statistics.  pymatchmaker
+        processes audio in bursts — racing through buffered frames in rapid
+        succession, then blocking on I/O.  Per-frame velocity swings wildly
+        between very high (burst) and zero (blocked wait), making std/mean
+        (CV) useless.  Total advancement over the window is invariant to burst
+        shape: it only asks "did the score position move forward fast enough?"
         """
         history = self._beat_history
         if len(history) < _MIN_HISTORY_FOR_CONFIDENCE:
             return 0.0
 
-        velocities = []
-        for i in range(1, len(history)):
-            t0, b0 = history[i - 1]
-            t1, b1 = history[i]
-            dt = t1 - t0
-            if dt > 0:
-                velocities.append((b1 - b0) / dt)
-
-        if not velocities:
+        oldest_time, oldest_beat = history[0]
+        newest_time, newest_beat = history[-1]
+        elapsed = newest_time - oldest_time
+        if elapsed <= 0:
             return 0.0
 
-        v_mean = statistics.fmean(velocities)
-        # Reject non-positive velocity (stalled/backward) AND extremely slow
-        # drift that looks like noise rather than music. 0.5 beats/sec = 30 BPM,
-        # which is below any practical orchestral tempo.
-        if v_mean < _MIN_VELOCITY_FOR_CONFIDENCE:
+        velocity = (newest_beat - oldest_beat) / elapsed
+        if velocity < _MIN_VELOCITY_FOR_CONFIDENCE:
             return 0.0
 
-        v_std = statistics.pstdev(velocities) if len(velocities) > 1 else 0.0
-        cv = v_std / v_mean
-        # Map [0, _CV_TO_ZERO_CONFIDENCE] → [1.0, 0.0]
-        confidence = max(0.0, 1.0 - cv / _CV_TO_ZERO_CONFIDENCE)
-        return min(1.0, confidence)
+        return 1.0
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
         beat, conf = self.get_latest()
