@@ -109,6 +109,10 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 
 ### config.json (Task 2 で必須)
 
+**最小構成 — `xml_file` を省略すると自動検出**
+
+`xml_file` を書かない場合、`config.json` と同じフォルダにある最初の `.mxl` ファイルが自動的に使われます。スコアが1ファイルだけなら、ファイル名を書く必要はありません。
+
 ```json
 {
   "settings": {
@@ -118,9 +122,8 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
   "movements": [
     {
       "id": 1,
-      "xml_file": "work/outbox/mv1_guide.xml",
       "triggers": [
-        { "measure": 1,  "action": "right", "note": "楽章1 開始" },
+        { "measure": 1,  "action": "right", "note": "冒頭" },
         { "measure": 45, "action": "right", "note": "テーマA" }
       ]
     }
@@ -128,7 +131,28 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 }
 ```
 
-`action` は `"right"`, `"left"`, `"up"`, `"down"`, `"space"`, `"enter"` などに対応 (内部で Playwright の `ArrowRight` 等にマップされます)。
+**`xml_file` を明示する場合**（複数楽章や別フォルダのファイルを使うとき）
+
+```json
+{
+  "movements": [
+    {
+      "id": 1,
+      "xml_file": "my_score.mxl",
+      "triggers": [...]
+    },
+    {
+      "id": 2,
+      "xml_file": "my_score_mv2.mxl",
+      "triggers": [...]
+    }
+  ]
+}
+```
+
+- `xml_file` は `config.json` からの相対パスまたは絶対パスで指定
+- 対応フォーマット: `.mxl`（圧縮 MusicXML）および `.xml` / `.musicxml`
+- `action` は `"right"` または `"left"` を指定
 
 ### compressor_config.json (Task 1 オプション)
 
