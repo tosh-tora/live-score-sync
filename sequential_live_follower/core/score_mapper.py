@@ -94,7 +94,17 @@ class ScoreMapper:
         )
 
         for measure in sorted_measures:
-            measure_num = getattr(measure, 'number', len(self.beat_thresholds) + 1)
+            # Prefer the MusicXML measure name over partitura's internal
+            # sequential number.  partitura renumbers from 1 even when the
+            # score starts with an anacrusis (pickup) that the MusicXML marks
+            # as measure 0.  Using `name` preserves the composer-intended
+            # numbering (e.g. 0→anacrusis, 1–77 for the 77 full measures of
+            # 別れの曲) so total_measures and trigger matching stay correct.
+            name = getattr(measure, 'name', None)
+            try:
+                measure_num = int(name)
+            except (TypeError, ValueError):
+                measure_num = len(self.beat_thresholds) + 1
 
             # Get time signature - try different access patterns
             ts = None
@@ -184,6 +194,16 @@ class ScoreMapper:
         beat_threshold = self.beat_thresholds[idx]
         return beat_count - beat_threshold
 
+    def get_total_measures(self) -> int:
+        """Return the last measure number in the score (as written in the MusicXML).
+
+        This equals the highest measure number stored in measure_info, which
+        correctly excludes anacrusis pickup measures that MusicXML numbers as 0.
+        """
+        if not self.measure_info:
+            return 0
+        return max(mnum for mnum, _ in self.measure_info.values())
+
     def get_total_beats(self) -> float:
         """
         Get total duration of score in beats.
@@ -228,4 +248,4 @@ class ScoreMapper:
 
     def __repr__(self) -> str:
         total_beats = self.get_total_beats()
-        return f"ScoreMapper(measures={len(self.beat_thresholds)}, total_beats={total_beats:.1f})"
+        return f"ScoreMapper(measures={self.get_total_measures()}, total_beats={total_beats:.1f})"
