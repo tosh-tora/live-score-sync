@@ -29,6 +29,9 @@ class AppState:
         self.current_movement_id: Optional[int] = None
         self.current_xml_file: Optional[str] = None
         self.current_triggers: List[dict] = []
+        self.current_movement_number: int = 1   # 1-indexed display number
+        self.total_movements: int = 1
+        self.total_measures: int = 0            # 0 = unknown (score not loaded)
 
         # Playback state
         self.current_beat: float = 0.0
@@ -74,6 +77,9 @@ class AppState:
             return {
                 'movement_id': self.current_movement_id,
                 'xml_file': self.current_xml_file,
+                'movement_number': self.current_movement_number,
+                'total_movements': self.total_movements,
+                'total_measures': self.total_measures,
                 'beat': self.current_beat,
                 'measure': self.current_measure,
                 'beat_in_measure': self.current_beat_in_measure,
@@ -123,7 +129,15 @@ class AppState:
             self.confidence = max(0.0, min(1.0, confidence))
         self.ui_update_event.set()
 
-    def set_movement(self, movement_id: int, xml_file: str, triggers: List[dict]):
+    def set_movement(
+        self,
+        movement_id: int,
+        xml_file: str,
+        triggers: List[dict],
+        movement_number: int = 1,
+        total_movements: int = 1,
+        total_measures: int = 0,
+    ):
         """
         Set current movement context.
 
@@ -136,6 +150,9 @@ class AppState:
             self.current_movement_id = movement_id
             self.current_xml_file = xml_file
             self.current_triggers = triggers
+            self.current_movement_number = movement_number
+            self.total_movements = total_movements
+            self.total_measures = total_measures
             self.current_beat = 0.0
             self.current_measure = 1
             self.current_beat_in_measure = 1.0

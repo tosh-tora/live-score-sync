@@ -232,10 +232,14 @@ class SequentialFollower:
         self._fired_trigger_measures.clear()
 
         triggers = movement.get("triggers", [])
+        total_measures = len(self.score_mapper.beat_thresholds)
         self.state.set_movement(
             movement_id=movement.get("id"),
             xml_file=xml_file,
             triggers=triggers,
+            movement_number=self.config.current_movement_number(),
+            total_movements=self.config.total_movements(),
+            total_measures=total_measures,
         )
         if triggers:
             self.state.set_next_trigger(min(t["measure"] for t in triggers))
