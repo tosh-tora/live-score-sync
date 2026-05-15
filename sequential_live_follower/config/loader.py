@@ -58,9 +58,13 @@ class ConfigLoader:
             FileNotFoundError: If config file doesn't exist
             json.JSONDecodeError: If config is invalid JSON
         """
-        path = Path(config_path)
+        path = Path(config_path).resolve()
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        # Remember the directory so xml_file paths can be resolved relative
+        # to the config file rather than the process working directory.
+        self.config_dir: Path = path.parent
 
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -84,6 +88,23 @@ class ConfigLoader:
             f"cooldown={self.get_cooldown_seconds()}s, "
             f"confidence_threshold={self.get_confidence_threshold()}"
         )
+
+    def resolve_path(self, relative_or_absolute: str) -> str:
+        """Resolve a path that may be relative to the config file's directory.
+
+        xml_file values in config.json are treated as relative to the config
+        file itself, so the operator can place config.json and the .xml files
+        in the same folder and refer to them by name only — regardless of the
+        working directory when the app is launched.
+
+        Absolute paths are returned unchanged.
+        """
+        p = Path(relative_or_absolute)
+        if p.is_absolute():
+            return str(p)
+        resolved = (self.config_dir / p).resolve()
+        logger.debug("Resolved xml path: %s → %s", relative_or_absolute, resolved)
+        return str(resolved)
 
     def _validate(self) -> None:
         """Check config structure and raise ConfigError on the first problem found.
