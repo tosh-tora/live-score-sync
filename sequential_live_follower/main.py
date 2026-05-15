@@ -442,6 +442,12 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Third-party libraries flood -v with bytecode dumps / font cache lookups
+    # that drown out our own DEBUG messages.  Pin them to INFO so the
+    # operator can actually read the matcher/inertia state transitions.
+    for noisy in ("numba", "matplotlib", "asyncio", "PIL", "fontTools"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
+
     config_path = Path(args.config)
     if not config_path.exists():
         logger.error("Config file not found: %s", config_path)
