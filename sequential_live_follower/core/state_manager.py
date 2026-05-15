@@ -32,6 +32,9 @@ class AppState:
         self.current_movement_number: int = 1   # 1-indexed display number
         self.total_movements: int = 1
         self.total_measures: int = 0            # 0 = unknown (score not loaded)
+        # Non-None when the last movement load failed — shown in the GUI so
+        # the operator knows exactly where to put the missing file.
+        self.load_error: Optional[str] = None
 
         # Playback state
         self.current_beat: float = 0.0
@@ -80,6 +83,7 @@ class AppState:
                 'movement_number': self.current_movement_number,
                 'total_movements': self.total_movements,
                 'total_measures': self.total_measures,
+                'load_error': self.load_error,
                 'beat': self.current_beat,
                 'measure': self.current_measure,
                 'beat_in_measure': self.current_beat_in_measure,
@@ -153,6 +157,7 @@ class AppState:
             self.current_movement_number = movement_number
             self.total_movements = total_movements
             self.total_measures = total_measures
+            self.load_error = None  # clear any previous error on successful load
             self.current_beat = 0.0
             self.current_measure = 1
             self.current_beat_in_measure = 1.0
@@ -197,6 +202,12 @@ class AppState:
             self.mic_level_db = level_db
             self.silence_gate_active = gate_active
             self.mic_monitor_available = monitor_available
+        self.ui_update_event.set()
+
+    def set_load_error(self, message: str) -> None:
+        """Record a movement-load failure message for GUI display."""
+        with self._lock:
+            self.load_error = message
         self.ui_update_event.set()
 
     def set_next_trigger(self, measure_num: Optional[int]):
