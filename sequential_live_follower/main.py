@@ -252,7 +252,7 @@ class SequentialFollower:
         self._fired_trigger_measures.clear()
 
         triggers = movement.get("triggers", [])
-        total_measures = len(self.score_mapper.beat_thresholds)
+        total_measures = self.score_mapper.get_total_measures()
         self.state.set_movement(
             movement_id=movement.get("id"),
             xml_file=xml_file,
