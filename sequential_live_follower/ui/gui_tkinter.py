@@ -43,6 +43,7 @@ _PREFERRED_FONT_FAMILIES = (
 _TITLE_FONT_SIZE = 28
 _FILE_FONT_SIZE = 32
 _MEASURE_FONT_SIZE = 140
+_BEAT_FONT_SIZE = 42
 _CONFIDENCE_FONT_SIZE = 24
 _TRIGGER_FONT_SIZE = 28
 _INERTIA_FONT_SIZE = 24
@@ -135,7 +136,19 @@ class FollowerGUI:
             bg="#f0f0f0",
             fg="blue"
         )
-        self.label_measure.pack(pady=20)
+        self.label_measure.pack(pady=(20, 0))
+
+        # Beat-within-measure (1-indexed, fractional).  Sits directly under
+        # the measure label so the operator reads "小節 N / 拍 X.XX" as a unit.
+        beat_font = font.Font(family=family, size=_BEAT_FONT_SIZE)
+        self.label_beat = tk.Label(
+            self.root,
+            text="♩ --",
+            font=beat_font,
+            bg="#f0f0f0",
+            fg="#246",
+        )
+        self.label_beat.pack(pady=(0, 15))
 
         # Confidence bar frame
         conf_frame = tk.Frame(self.root, bg="#f0f0f0")
@@ -215,6 +228,10 @@ class FollowerGUI:
             # Measure (large)
             measure = state['measure']
             self.label_measure.config(text=str(measure))
+
+            # Beat-within-measure (1-indexed, e.g. "♩ 2.45").
+            beat_in_measure = state.get('beat_in_measure', 1.0)
+            self.label_beat.config(text=f"♩ {beat_in_measure:.2f}")
 
             # Confidence with color coding
             conf = state['confidence']

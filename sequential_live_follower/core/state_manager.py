@@ -33,6 +33,11 @@ class AppState:
         # Playback state
         self.current_beat: float = 0.0
         self.current_measure: int = 1
+        # Beat position within the current measure, 1-indexed for display
+        # ("1拍目" = 1.0, halfway through 2拍目 = 2.5).  Computed by
+        # ScoreMapper.get_beat_in_measure(continuous_beat) + 1.0 in the
+        # state-sync loop, so time-signature changes are honored.
+        self.current_beat_in_measure: float = 1.0
         self.confidence: float = 0.0
 
         # Trigger/cooldown state
@@ -71,6 +76,7 @@ class AppState:
                 'xml_file': self.current_xml_file,
                 'beat': self.current_beat,
                 'measure': self.current_measure,
+                'beat_in_measure': self.current_beat_in_measure,
                 'confidence': self.confidence,
                 'inertia_mode': self.inertia_mode,
                 'cooldown_active': self.cooldown_active,
@@ -81,19 +87,29 @@ class AppState:
                 'mic_monitor_available': self.mic_monitor_available,
             }
 
-    def update_beat_measure(self, beat: float, measure: int):
+    def update_beat_measure(
+        self,
+        beat: float,
+        measure: int,
+        beat_in_measure: float = 1.0,
+    ):
         """
         Update beat and measure atomically.
 
         Args:
             beat: Continuous beat position
             measure: Measure number
+            beat_in_measure: 1-indexed beat offset inside the current measure
+                (e.g. 1.0 = downbeat, 2.5 = midway through the second beat).
+                Caller is responsible for converting from the score's
+                0-indexed offset to 1-indexed for display.
 
         Triggers UI update event.
         """
         with self._lock:
             self.current_beat = beat
             self.current_measure = measure
+            self.current_beat_in_measure = beat_in_measure
         self.ui_update_event.set()
 
     def set_confidence(self, confidence: float):
@@ -122,6 +138,7 @@ class AppState:
             self.current_triggers = triggers
             self.current_beat = 0.0
             self.current_measure = 1
+            self.current_beat_in_measure = 1.0
             self.confidence = 0.0
             self.inertia_mode = False
             self.cooldown_active = False

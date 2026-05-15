@@ -283,8 +283,11 @@ class SequentialFollower:
 
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
+                # ScoreMapper returns a 0-indexed offset (downbeat = 0.0);
+                # shift to 1-indexed so the GUI shows "1拍目" on the downbeat.
+                beat_in_measure = mapper.get_beat_in_measure(beat) + 1.0
 
-                self.state.update_beat_measure(beat, measure)
+                self.state.update_beat_measure(beat, measure, beat_in_measure)
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
