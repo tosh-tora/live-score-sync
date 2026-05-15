@@ -32,7 +32,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 
-from sequential_live_follower.config.loader import ConfigLoader
+from sequential_live_follower.config.loader import ConfigError, ConfigLoader
 from sequential_live_follower.core.audio_level import AudioLevelMonitor
 from sequential_live_follower.core.cooldown_timer import CooldownTimer
 from sequential_live_follower.core.inertia_engine import InertiaEngine
@@ -460,6 +460,12 @@ def main() -> int:
         app = SequentialFollower(str(config_path), slide_url=args.slide_url)
         app.run()
         return 0
+    except ConfigError as exc:
+        # User-visible config mistake — print cleanly without a traceback so
+        # the operator can act on the message directly.
+        logger.error("設定ファイルエラー — config.json を修正してから再起動してください")
+        logger.error("  %s", exc)
+        return 1
     except Exception as exc:  # noqa: BLE001
         logger.error("Fatal error: %s", exc, exc_info=True)
         return 1
