@@ -13,6 +13,16 @@ from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
+_VALID_ACTIONS = {"right", "left"}
+
+
+class ConfigError(ValueError):
+    """Raised when config.json has a syntax error or invalid structure.
+
+    Caught by main() to print a user-readable message and exit(1) before any
+    threads are spawned — prevents silent silently bad state.
+    """
+
 
 class ConfigLoader:
     """
@@ -52,19 +62,77 @@ class ConfigLoader:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
 
-        with open(path, 'r', encoding='utf-8') as f:
-            self.config = json.load(f)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"config.json の JSON 構文エラー: {exc.msg} "
+                f"(行 {exc.lineno}, 列 {exc.colno})\n"
+                f"  ヒント: カンマ忘れ・括弧の対応ミスが多い原因です"
+            ) from exc
 
         # Extract sections
         self.settings = self.config.get('settings', {})
         self.movements = self.config.get('movements', [])
         self.current_movement_idx = 0
 
+        self._validate()
+
         logger.info(
             f"Config loaded: {len(self.movements)} movements, "
             f"cooldown={self.get_cooldown_seconds()}s, "
             f"confidence_threshold={self.get_confidence_threshold()}"
         )
+
+    def _validate(self) -> None:
+        """Check config structure and raise ConfigError on the first problem found.
+
+        Called once in __init__, before any other code runs.  Errors include
+        the full JSON path (e.g. "movements[0].triggers[2].action") so the
+        operator can fix the config without guessing.
+        """
+        if not isinstance(self.movements, list) or not self.movements:
+            raise ConfigError(
+                "'movements' が空または存在しません。"
+                "少なくとも1楽章（movement）を定義してください"
+            )
+
+        for mv_idx, movement in enumerate(self.movements):
+            mv = f"movements[{mv_idx}]"
+
+            if not movement.get("xml_file"):
+                raise ConfigError(f"{mv}: 'xml_file' がありません")
+
+            triggers = movement.get("triggers", [])
+            if not isinstance(triggers, list):
+                raise ConfigError(f"{mv}.triggers: リスト形式が必要です")
+
+            for t_idx, trig in enumerate(triggers):
+                tp = f"{mv}.triggers[{t_idx}]"
+
+                # --- measure ---
+                if "measure" not in trig:
+                    raise ConfigError(f"{tp}: 'measure' フィールドがありません")
+                try:
+                    m = int(trig["measure"])
+                    if m < 1:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise ConfigError(
+                        f"{tp}.measure: 1 以上の整数が必要です "
+                        f"(got {trig['measure']!r})"
+                    )
+
+                # --- action ---
+                action = trig.get("action")
+                if action not in _VALID_ACTIONS:
+                    raise ConfigError(
+                        f"{tp}.action: 'right' または 'left' が必要です "
+                        f"(got {action!r})"
+                    )
+
+        logger.debug("Config validation passed (%d movements)", len(self.movements))
 
     def get_current_movement(self) -> Optional[Dict]:
         """
