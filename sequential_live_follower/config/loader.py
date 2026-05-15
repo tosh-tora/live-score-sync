@@ -106,12 +106,22 @@ class ConfigLoader:
         logger.debug("Resolved xml path: %s → %s", relative_or_absolute, resolved)
         return str(resolved)
 
+    def _auto_discover_mxl(self) -> Optional[Path]:
+        """Return the first .mxl file in config_dir (alphabetical order), or None."""
+        mxl_files = sorted(self.config_dir.glob("*.mxl"))
+        return mxl_files[0] if mxl_files else None
+
     def _validate(self) -> None:
         """Check config structure and raise ConfigError on the first problem found.
 
         Called once in __init__, before any other code runs.  Errors include
         the full JSON path (e.g. "movements[0].triggers[2].action") so the
         operator can fix the config without guessing.
+
+        If a movement omits ``xml_file``, the config directory is searched for
+        the first ``.mxl`` file (alphabetically).  This lets the operator drop
+        a single score file next to config.json and skip the filename field
+        entirely.
         """
         if not isinstance(self.movements, list) or not self.movements:
             raise ConfigError(
@@ -123,7 +133,20 @@ class ConfigLoader:
             mv = f"movements[{mv_idx}]"
 
             if not movement.get("xml_file"):
-                raise ConfigError(f"{mv}: 'xml_file' がありません")
+                discovered = self._auto_discover_mxl()
+                if discovered is None:
+                    raise ConfigError(
+                        f"{mv}: 'xml_file' が指定されておらず、"
+                        f"{self.config_dir} に .mxl ファイルも見つかりません。\n"
+                        f"  ヒント: MusicXML (.mxl) ファイルを config.json と同じ"
+                        f"フォルダに置いてください"
+                    )
+                movement["xml_file"] = discovered.name
+                logger.info(
+                    "movements[%d]: xml_file 未指定 → '%s' を自動検出しました",
+                    mv_idx,
+                    discovered.name,
+                )
 
             triggers = movement.get("triggers", [])
             if not isinstance(triggers, list):
