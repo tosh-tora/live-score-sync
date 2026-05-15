@@ -127,10 +127,11 @@ class FollowerGUI:
         )
         self.label_movement.pack(pady=(2, 0))
 
-        # ファイル名（小さめ）
+        # ファイル名 or エラーメッセージ（小さめ）
         file_font = font.Font(family=family, size=_CONFIDENCE_FONT_SIZE)
         self.label_file = tk.Label(
-            self.root, text="[ファイル未読込]", font=file_font, bg="#f0f0f0", fg="#888"
+            self.root, text="[ファイル未読込]", font=file_font, bg="#f0f0f0", fg="#888",
+            wraplength=1300, justify="center",
         )
         self.label_file.pack(pady=(0, 4))
 
@@ -220,11 +221,15 @@ class FollowerGUI:
             mv_total = state.get('total_movements', 1)
             self.label_movement.config(text=f"第{mv_num}楽章 / 全{mv_total}楽章")
 
-            # ファイル名（ベース名のみ）
-            filename = state['xml_file'] or "[ファイル未読込]"
-            if isinstance(filename, str):
-                filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
-            self.label_file.config(text=filename)
+            # ファイル名 or ロードエラーメッセージ
+            load_error = state.get('load_error')
+            if load_error:
+                self.label_file.config(text=f"⚠ {load_error}", fg="red")
+            else:
+                filename = state['xml_file'] or "[ファイル未読込]"
+                if isinstance(filename, str):
+                    filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+                self.label_file.config(text=filename, fg="#888")
 
             # 小節番号（大きな数字）
             measure = state['measure']

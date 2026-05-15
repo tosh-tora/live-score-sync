@@ -203,6 +203,21 @@ class SequentialFollower:
         # about the working directory at launch time.
         xml_file = self.config.resolve_path(xml_file_raw)
 
+        # Fail fast with a clear placement instruction before touching any
+        # audio/browser threads.
+        from pathlib import Path as _Path
+        if not _Path(xml_file).exists():
+            msg = (
+                f"楽譜ファイルが見つかりません。\n"
+                f"  → {xml_file}\n"
+                f"  に置いてください"
+            )
+            logger.error(msg)
+            self.state.set_load_error(
+                f"ファイルが見つかりません。\n{xml_file}\nに置いてください"
+            )
+            return
+
         logger.info("Loading movement: %s", xml_file)
 
         # Stop the previous matcher cleanly before swapping in the new one.
