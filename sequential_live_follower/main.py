@@ -193,10 +193,15 @@ class SequentialFollower:
 
     def _load_movement(self, movement: dict) -> None:
         """Tear down any current matcher and start a new one for ``movement``."""
-        xml_file = movement.get("xml_file")
-        if not xml_file:
+        xml_file_raw = movement.get("xml_file")
+        if not xml_file_raw:
             logger.error("Movement has no xml_file: %s", movement)
             return
+
+        # Resolve relative to config.json's directory so the operator can
+        # place config.json and .xml files in the same folder without worrying
+        # about the working directory at launch time.
+        xml_file = self.config.resolve_path(xml_file_raw)
 
         logger.info("Loading movement: %s", xml_file)
 
