@@ -51,7 +51,9 @@ _COOLDOWN_FONT_SIZE = 22
 _HINT_FONT_SIZE = 18
 
 # Window + confidence bar geometry, also scaled ~2x to match the new fonts.
-_WINDOW_GEOMETRY = "1400x800"
+# Height bumped to 1000 so the mic-level / inertia / cooldown / hint rows
+# below the confidence bar are not clipped by the bottom of the window.
+_WINDOW_GEOMETRY = "1400x1000"
 _BAR_WIDTH = 400
 _BAR_HEIGHT = 36
 
@@ -173,6 +175,14 @@ class FollowerGUI:
         )
         self.canvas_confidence.pack(side=tk.LEFT, padx=10)
 
+        # マイクレベル — 確信度バーの直下に置く。確信度はマイク入力に直結する
+        # ので並べて確認できると運用しやすい。下にある要素（クールダウン等）が
+        # ウィンドウ高さの関係で見切れても、入力レベルだけは見えるようにする。
+        self.label_mic_level = tk.Label(
+            self.root, text="マイク: -- dBFS", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="#444"
+        )
+        self.label_mic_level.pack(pady=2)
+
         # 次のトリガー
         trigger_font = font.Font(family=family, size=_TRIGGER_FONT_SIZE)
         self.label_next_trigger = tk.Label(
@@ -191,12 +201,6 @@ class FollowerGUI:
             self.root, text="", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="orange"
         )
         self.label_cooldown.pack(pady=2)
-
-        # マイクレベル
-        self.label_mic_level = tk.Label(
-            self.root, text="マイク: -- dBFS", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="#444"
-        )
-        self.label_mic_level.pack(pady=2)
 
         # キーヒント
         self.label_hints = tk.Label(
