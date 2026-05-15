@@ -71,6 +71,14 @@ class ScoreMapper:
         - (3, 4) = 3 quarter notes = 3.0 beats
         - (5, 8) = 5 eighth notes = 2.5 beats (5 * 0.5)
         - General: (num / denom) * 4 quarter notes per measure
+
+        Partial-measure handling (anacrusis / pickup):
+        The time signature gives the NOMINAL beat count for a full measure.
+        An anacrusis (e.g. MusicXML measure number 0) has a shorter actual
+        duration.  We compute ``divs_per_beat`` from the most common full
+        measure and use ``measure.duration / divs_per_beat`` for each measure,
+        so that a 1-beat anacrusis contributes exactly 1 beat to the cumulative
+        counter — matching what pymatchmaker produces for the same score.
         """
         cumulative_beat = 0.0
 
@@ -93,6 +101,48 @@ class ScoreMapper:
             key=lambda m: m.start.t if hasattr(m, 'start') and hasattr(m.start, 't') else 0
         )
 
+        # ------------------------------------------------------------------
+        # Pass 1: compute divs_per_beat from the most common (duration, ts)
+        # pairing.  This lets us convert measure.duration to beats correctly
+        # for partial measures (anacrusis, final pickup, etc.) without relying
+        # solely on the time signature.
+        # ------------------------------------------------------------------
+        from collections import Counter
+        dur_ts_counter: Counter = Counter()
+        for m in sorted_measures:
+            d = getattr(m, 'duration', None)
+            if not (d and d > 0):
+                continue
+            ts = None
+            if hasattr(m, 'time_signature'):
+                ts = m.time_signature
+            elif hasattr(self.part, 'time_signature_map'):
+                start_t = m.start.t if hasattr(m, 'start') and hasattr(m.start, 't') else 0
+                ts_map = self.part.time_signature_map
+                if ts_map:
+                    ts = ts_map(start_t) if callable(ts_map) else ts_map.get(start_t)
+            if ts is None:
+                ts = (4, 4)
+            if hasattr(ts, 'beats') and hasattr(ts, 'beat_type'):
+                n, dn = ts.beats, ts.beat_type
+            elif isinstance(ts, tuple):
+                n, dn = ts
+            else:
+                n, dn = 4, 4
+            beats = (n / dn) * 4.0
+            if beats > 0:
+                dur_ts_counter[(int(d), beats)] += 1
+
+        divs_per_beat: float = 0.0
+        if dur_ts_counter:
+            (ref_dur, ref_beats), _ = dur_ts_counter.most_common(1)[0]
+            divs_per_beat = ref_dur / ref_beats
+            logger.debug("divs_per_beat=%.2f (from most common measure: dur=%d, beats=%.1f)",
+                         divs_per_beat, ref_dur, ref_beats)
+
+        # ------------------------------------------------------------------
+        # Pass 2: build the beat map
+        # ------------------------------------------------------------------
         for measure in sorted_measures:
             # Prefer the MusicXML measure name over partitura's internal
             # sequential number.  partitura renumbers from 1 even when the
@@ -128,19 +178,29 @@ class ScoreMapper:
             else:
                 num, denom = 4, 4
 
-            # Calculate beats in this measure (quarterLength = 1 beat)
+            # Nominal beat count from time signature (stored for beat_in_measure calc)
             beats_per_measure = (num / denom) * 4.0
+
+            # Actual beats to advance the cumulative counter.
+            # Use measure.duration when we have a valid divs_per_beat reference,
+            # so that anacrusis / partial measures advance by their true length.
+            actual_beats = beats_per_measure
+            if divs_per_beat > 0:
+                actual_dur = getattr(measure, 'duration', None)
+                if actual_dur and actual_dur > 0:
+                    actual_beats = actual_dur / divs_per_beat
 
             # Store mapping
             self.beat_thresholds.append(cumulative_beat)
             self.measure_info[cumulative_beat] = (measure_num, beats_per_measure)
 
             logger.debug(
-                f"Measure {measure_num}: beat {cumulative_beat:.1f}→{cumulative_beat + beats_per_measure:.1f} "
-                f"({num}/{denom}, {beats_per_measure:.1f} beats)"
+                "Measure %s: beat %.1f→%.1f (ts=%d/%d, nominal=%.1f, actual=%.1f beats)",
+                measure_num, cumulative_beat, cumulative_beat + actual_beats,
+                num, denom, beats_per_measure, actual_beats,
             )
 
-            cumulative_beat += beats_per_measure
+            cumulative_beat += actual_beats
 
     def beat_to_measure(self, beat_count: float) -> int:
         """
