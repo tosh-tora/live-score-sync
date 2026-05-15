@@ -382,7 +382,7 @@ class SequentialFollower:
 
         Hotkeys:
             N       : load next movement
-            R       : reset tracking state
+            R       : reload current movement (restarts matcher + resets tracking)
             → / Space : manually advance one slide
             ←       : manually go back one slide
         """
@@ -391,11 +391,17 @@ class SequentialFollower:
             self._load_next_movement()
 
         def _on_r(_event: tk.Event) -> None:
-            logger.info("'R' key pressed → resetting tracking state")
-            self.inertia.reset_tracking()
-            # Also clear fired triggers so the operator can re-fire from
-            # the top after a manual reset.
-            self._fired_trigger_measures.clear()
+            # Full reload of the current movement.  We intentionally do
+            # *not* just reset the InertiaEngine because the Matchmaker
+            # generator may already have terminated — e.g. when playback
+            # ran past the end of the score, Matchmaker.run() raises
+            # StopIteration and the worker thread exits.  After that the
+            # worker is dead and no amount of inertia-reset will revive it.
+            # Reloading the movement constructs a fresh Matchmaker, restarts
+            # its worker thread, and clears inertia / cooldown / fired
+            # triggers in one shot.
+            logger.info("'R' key pressed → reloading current movement")
+            self._load_current_movement()
 
         def _on_slide_next(_event: tk.Event) -> None:
             logger.info("Manual slide advance (→/Space)")
@@ -413,7 +419,7 @@ class SequentialFollower:
         self.root.bind("<KeyPress-space>", _on_slide_next)
         self.root.bind("<KeyPress-Left>", _on_slide_prev)
         logger.info(
-            "Operator hotkeys bound: N=next movement, R=reset tracking, "
+            "Operator hotkeys bound: N=next movement, R=reload current movement, "
             "→/Space=manual next slide, ←=manual previous slide"
         )
 
