@@ -206,7 +206,7 @@ class FollowerGUI:
             self.root,
             text=(
                 "→/Space: スライドを進める   ←: スライドを戻す   "
-                "N: 次の楽章   R: 追従状態をリセット"
+                "N: 次の楽章   R: 現在の楽章を再ロード"
             ),
             font=(family, _HINT_FONT_SIZE),
             bg="#f0f0f0",
