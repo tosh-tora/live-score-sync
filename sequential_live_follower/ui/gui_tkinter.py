@@ -113,95 +113,91 @@ class FollowerGUI:
         """Create and layout tkinter widgets."""
         family = self._font_family
 
-        # Title
+        # タイトル
         title_font = font.Font(family=family, size=_TITLE_FONT_SIZE, weight="bold")
         title_label = tk.Label(
             self.root, text="Sequential Live Follower", font=title_font, bg="#f0f0f0"
         )
-        title_label.pack(pady=10)
+        title_label.pack(pady=(10, 2))
 
-        # File name (large font)
-        file_font = font.Font(family=family, size=_FILE_FONT_SIZE, weight="bold")
-        self.label_file = tk.Label(
-            self.root, text="[No file loaded]", font=file_font, bg="#f0f0f0", fg="#333"
+        # 楽章表示（例: 第1楽章 / 全3楽章）
+        movement_font = font.Font(family=family, size=_FILE_FONT_SIZE, weight="bold")
+        self.label_movement = tk.Label(
+            self.root, text="楽章読込中…", font=movement_font, bg="#f0f0f0", fg="#333"
         )
-        self.label_file.pack(pady=10)
+        self.label_movement.pack(pady=(2, 0))
 
-        # Current measure (very large)
+        # ファイル名（小さめ）
+        file_font = font.Font(family=family, size=_CONFIDENCE_FONT_SIZE)
+        self.label_file = tk.Label(
+            self.root, text="[ファイル未読込]", font=file_font, bg="#f0f0f0", fg="#888"
+        )
+        self.label_file.pack(pady=(0, 4))
+
+        # 現在小節（大きな数字）＋ n / m 小節目 表示
         measure_font = font.Font(family=family, size=_MEASURE_FONT_SIZE, weight="bold")
         self.label_measure = tk.Label(
-            self.root,
-            text="--",
-            font=measure_font,
-            bg="#f0f0f0",
-            fg="blue"
+            self.root, text="--", font=measure_font, bg="#f0f0f0", fg="blue"
         )
-        self.label_measure.pack(pady=(20, 0))
+        self.label_measure.pack(pady=(10, 0))
 
-        # Beat-within-measure (1-indexed, fractional).  Sits directly under
-        # the measure label so the operator reads "小節 N / 拍 X.XX" as a unit.
+        measure_sub_font = font.Font(family=family, size=_BEAT_FONT_SIZE)
+        self.label_measure_sub = tk.Label(
+            self.root, text="-- / -- 小節目", font=measure_sub_font, bg="#f0f0f0", fg="#246"
+        )
+        self.label_measure_sub.pack(pady=(0, 4))
+
+        # 拍位置
         beat_font = font.Font(family=family, size=_BEAT_FONT_SIZE)
         self.label_beat = tk.Label(
-            self.root,
-            text="♩ --",
-            font=beat_font,
-            bg="#f0f0f0",
-            fg="#246",
+            self.root, text="♩ --", font=beat_font, bg="#f0f0f0", fg="#468"
         )
-        self.label_beat.pack(pady=(0, 15))
+        self.label_beat.pack(pady=(0, 10))
 
-        # Confidence bar frame
+        # 確信度バー
         conf_frame = tk.Frame(self.root, bg="#f0f0f0")
-        conf_frame.pack(pady=15)
+        conf_frame.pack(pady=8)
 
-        conf_label = tk.Label(
-            conf_frame, text="Confidence:", font=(family, _CONFIDENCE_FONT_SIZE), bg="#f0f0f0"
-        )
-        conf_label.pack(side=tk.LEFT, padx=10)
+        tk.Label(
+            conf_frame, text="確信度:", font=(family, _CONFIDENCE_FONT_SIZE), bg="#f0f0f0"
+        ).pack(side=tk.LEFT, padx=10)
 
         self.label_confidence = tk.Label(
             conf_frame, text="-- (--)", font=(family, _CONFIDENCE_FONT_SIZE), bg="#f0f0f0", fg="gray"
         )
         self.label_confidence.pack(side=tk.LEFT, padx=10)
 
-        # Progress bar (simple visual representation)
         self.canvas_confidence = tk.Canvas(
             conf_frame, width=_BAR_WIDTH, height=_BAR_HEIGHT, bg="white", highlightthickness=1
         )
         self.canvas_confidence.pack(side=tk.LEFT, padx=10)
 
-        # Next trigger measure
+        # 次のトリガー
         trigger_font = font.Font(family=family, size=_TRIGGER_FONT_SIZE)
         self.label_next_trigger = tk.Label(
-            self.root,
-            text="Next trigger: --",
-            font=trigger_font,
-            bg="#f0f0f0",
-            fg="#555"
+            self.root, text="次のトリガー: --", font=trigger_font, bg="#f0f0f0", fg="#555"
         )
-        self.label_next_trigger.pack(pady=5)
+        self.label_next_trigger.pack(pady=4)
 
-        # Inertia mode indicator
+        # 慣性モード表示
         self.label_inertia = tk.Label(
             self.root, text="", font=(family, _INERTIA_FONT_SIZE, "bold"), bg="#f0f0f0", fg="red"
         )
-        self.label_inertia.pack(pady=5)
+        self.label_inertia.pack(pady=2)
 
-        # Cooldown indicator
+        # クールダウン表示
         self.label_cooldown = tk.Label(
             self.root, text="", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="orange"
         )
         self.label_cooldown.pack(pady=2)
 
-        # Mic level (live dBFS reading + silence-gate status).  Critical for
-        # diagnosing "system never tracks" — if the level never gets above
-        # config.silence_threshold_db, the gate is suppressing every frame.
+        # マイクレベル
         self.label_mic_level = tk.Label(
-            self.root, text="Mic: -- dBFS", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="#444"
+            self.root, text="マイク: -- dBFS", font=(family, _COOLDOWN_FONT_SIZE), bg="#f0f0f0", fg="#444"
         )
         self.label_mic_level.pack(pady=2)
 
-        # Key hints (always visible at the bottom)
+        # キーヒント
         self.label_hints = tk.Label(
             self.root,
             text=(
@@ -219,21 +215,33 @@ class FollowerGUI:
         try:
             state = self.state.get_all()
 
-            # File name (show basename only, handles both / and \ separators)
-            filename = state['xml_file'] or "[No file]"
+            # 楽章表示（例: 第1楽章 / 全3楽章）
+            mv_num = state.get('movement_number', 1)
+            mv_total = state.get('total_movements', 1)
+            self.label_movement.config(text=f"第{mv_num}楽章 / 全{mv_total}楽章")
+
+            # ファイル名（ベース名のみ）
+            filename = state['xml_file'] or "[ファイル未読込]"
             if isinstance(filename, str):
                 filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
             self.label_file.config(text=filename)
 
-            # Measure (large)
+            # 小節番号（大きな数字）
             measure = state['measure']
             self.label_measure.config(text=str(measure))
 
-            # Beat-within-measure (1-indexed, e.g. "♩ 2.45").
+            # n / m 小節目
+            total = state.get('total_measures', 0)
+            if total > 0:
+                self.label_measure_sub.config(text=f"{measure} / {total} 小節目")
+            else:
+                self.label_measure_sub.config(text=f"{measure} 小節目")
+
+            # 拍位置
             beat_in_measure = state.get('beat_in_measure', 1.0)
             self.label_beat.config(text=f"♩ {beat_in_measure:.2f}")
 
-            # Confidence with color coding
+            # 確信度（色分け）
             conf = state['confidence']
             if conf > 0.6:
                 color = "green"
@@ -241,54 +249,46 @@ class FollowerGUI:
                 color = "orange"
             else:
                 color = "red"
+            self.label_confidence.config(text=f"{conf:.2f} ({int(conf*100)}%)", fg=color)
 
-            self.label_confidence.config(
-                text=f"{conf:.2f} ({int(conf*100)}%)",
-                fg=color
-            )
-
-            # Confidence bar
+            # 確信度バー
             self.canvas_confidence.delete("all")
             bar_width = _BAR_WIDTH * conf
             self.canvas_confidence.create_rectangle(
                 0, 0, bar_width, _BAR_HEIGHT, fill=color, outline="black"
             )
 
-            # Next trigger
+            # 次のトリガー
             next_trig = state['next_trigger_measure']
             if next_trig:
-                self.label_next_trigger.config(text=f"Next trigger: {next_trig}")
+                self.label_next_trigger.config(text=f"次のトリガー: {next_trig} 小節目")
             else:
-                self.label_next_trigger.config(text="Next trigger: --")
+                self.label_next_trigger.config(text="次のトリガー: --")
 
-            # Inertia indicator
+            # 慣性モード
             if state['inertia_mode']:
-                self.label_inertia.config(text="⚠ INERTIA MODE")
+                self.label_inertia.config(text="⚠ 慣性モード（推定）")
             else:
                 self.label_inertia.config(text="")
 
-            # Cooldown indicator
+            # クールダウン
             if state['cooldown_active']:
-                self.label_cooldown.config(text="🔒 Cooldown active")
+                self.label_cooldown.config(text="🔒 クールダウン中")
             else:
                 self.label_cooldown.config(text="")
 
-            # Mic level / silence gate.  Three distinct states:
-            #   - monitor failed to start → can't measure anything, warn the
-            #     operator that the silence gate is disabled
-            #   - level below threshold → silence gate is suppressing matcher
-            #   - level above threshold → input is being heard
+            # マイクレベル
             mic_available = state.get('mic_monitor_available', False)
             mic_db = state.get('mic_level_db', -120.0)
             gate = state.get('silence_gate_active', False)
             if not mic_available:
-                mic_text = "Mic: 監視無効 (silence gate 無効) — ログを確認してください"
+                mic_text = "マイク: 監視無効（silence gate 無効）— ログを確認"
                 mic_color = "#c60"
             elif gate:
-                mic_text = f"Mic: {mic_db:.1f} dBFS  ⚠ 無音判定 (閾値未満)"
+                mic_text = f"マイク: {mic_db:.1f} dBFS  ⚠ 無音（閾値未満）"
                 mic_color = "red"
             else:
-                mic_text = f"Mic: {mic_db:.1f} dBFS  ✓ 入力検出"
+                mic_text = f"マイク: {mic_db:.1f} dBFS  ✓ 入力検出"
                 mic_color = "#2a7"
             self.label_mic_level.config(text=mic_text, fg=mic_color)
 
