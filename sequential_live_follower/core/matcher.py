@@ -10,35 +10,41 @@ Design notes
 ------------
 The public `matchmaker` API yields a single `current_position` (in beats) per
 audio frame; it does not surface a confidence value as of pymatchmaker 0.2.1.
-To keep the existing InertiaEngine semantics (which expects a confidence in
-[0, 1]), we approximate confidence from the *stability of sub-window mean
-velocities* over a recent history window.
+We expose a binary confidence (0.0 or 1.0) derived from two checks over a
+recent history window:
 
-Why sub-window CV instead of either per-frame CV or endpoint velocity:
+1. The matcher has emitted ``_MIN_HISTORY_FOR_CONFIDENCE`` samples in the
+   last ``_CONFIDENCE_WINDOW_SEC`` seconds (i.e. it's actually running).
+2. The window-wide beat velocity falls inside
+   ``[_MIN_VELOCITY_FOR_CONFIDENCE, _MAX_VELOCITY_FOR_CONFIDENCE]`` — fast
+   enough to be real music, slow enough to reject runaway matches.
 
-- **Per-frame CV** (an earlier design) breaks under pymatchmaker's burst-mode
-  output: it races through buffered frames, then blocks on audio I/O.  Per-
-  frame velocity swings between very large and zero even during correct
-  tracking, so std/mean is always huge.
+What we deliberately do *not* do
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+We previously gated on the *coefficient of variation* of sub-window mean
+velocities (rejecting when CV > 0.4).  In practice live music routinely
+crossed that threshold during expressive playing — rit/accel, fermatas,
+strong dynamics, rests — collapsing confidence to 0 for long stretches.
+The InertiaEngine then started extrapolating at a stale tempo and the
+beat counter raced ahead of the conductor.  The CV check has been
+removed; reasoning against the prior designs is preserved here for the
+next person who is tempted to put a clever filter back in:
 
-- **Endpoint velocity only** (a later, simpler design) flips the other way:
-  whenever pymatchmaker is producing *any* output, the endpoint velocity is
-  positive, so irrelevant audio (speech, unrelated music) trivially scores
-  confidence=1.0 — pymatchmaker keeps reporting *some* score position even
-  when it's nonsense.
+- **Per-frame CV** breaks under pymatchmaker's burst-mode output: it
+  races through buffered frames, then blocks on audio I/O.  Per-frame
+  velocity swings between very large and zero even during correct
+  tracking.
 
-- **Sub-window mean velocity CV** (current design) splits the window into N
-  equal sub-windows (~0.5 s each).  Each sub-window's mean velocity absorbs
-  pymatchmaker's burst pattern.  Real tracking has all sub-window means in
-  agreement (low CV across sub-windows).  Irrelevant audio makes pymatchmaker
-  toss the position around, producing inconsistent sub-window means (high CV).
+- **Endpoint velocity** is what we use now.  Yes, irrelevant audio can
+  cause pymatchmaker to advance and trivially scores confidence=1.0 —
+  but the silence gate (``AudioLevelMonitor``) catches the no-input case
+  and the operator-controlled lock-in delay (``_CONFIDENT_FRAMES_TO_LOCK_IN``
+  in inertia_engine.py) prevents a single bad frame from firing slides.
+  Trying to filter out "wrong piece" audio in this layer added more
+  pain than it solved.
 
-We additionally cap velocity at _MAX_VELOCITY_FOR_CONFIDENCE — runaway matches
-on noise sometimes lock onto an absurd tempo (>300 BPM) and need explicit
-rejection.
-
-The silence gate (AudioLevelMonitor) handles the silent-mic case; this
-module's job is to distinguish "real music" from "audio of the wrong piece".
+- **Sub-window mean velocity CV** (removed): see above — too strict for
+  real live performance.
 
 If a future pymatchmaker release exposes a real confidence/cost value, this
 module is the single place that needs to change.
@@ -47,7 +53,6 @@ module is the single place that needs to change.
 from __future__ import annotations
 
 import logging
-import statistics
 import threading
 import time
 from collections import deque
@@ -57,8 +62,11 @@ logger = logging.getLogger(__name__)
 
 # Confidence estimation window (seconds of recent beat history we track)
 _CONFIDENCE_WINDOW_SEC = 2.0
-# If beat hasn't advanced for this long, force confidence to 0
-_STALL_TIMEOUT_SEC = 1.0
+# If beat hasn't advanced for this long, force confidence to 0.
+# pymatchmaker emits in bursts (many frames in milliseconds, then blocks on
+# audio I/O for hundreds of milliseconds).  1 s was too short and confidence
+# briefly dropped to 0 in normal operation; 2 s gives the burst pattern room.
+_STALL_TIMEOUT_SEC = 2.0
 # Minimum number of beat samples before any positive confidence is reported.
 # Below this threshold confidence is forced to 0.0 so the inertia engine does
 # not falsely conclude that tracking has begun during the matcher's warmup.
@@ -70,17 +78,6 @@ _MIN_VELOCITY_FOR_CONFIDENCE = 0.5
 # spurious matches in irrelevant audio and race through the score; this cap
 # rejects those. 5 beats/sec = 300 BPM — above any realistic orchestral tempo.
 _MAX_VELOCITY_FOR_CONFIDENCE = 5.0
-# Number of sub-windows the confidence window is divided into for stability
-# checking. 4 sub-windows over 2s = 0.5s each, large enough to absorb a typical
-# pymatchmaker burst while still revealing window-scale instability.
-_SUBWINDOW_COUNT = 4
-# Coefficient of variation across sub-window mean velocities, above which
-# tracking is considered unstable. Real tracking keeps each sub-window's mean
-# velocity close to the others; irrelevant audio scatters them.
-_SUBWINDOW_CV_TO_ZERO = 0.4
-# Minimum number of sub-windows that must have >=2 samples to evaluate
-# stability. One sparse sub-window is tolerated.
-_MIN_POPULATED_SUBWINDOWS = _SUBWINDOW_COUNT - 1
 
 
 class MatchMaker:
@@ -320,25 +317,18 @@ class MatchMaker:
         Returns 0.0 (not a "neutral" 0.5) until we have enough data to make
         a real judgement.  Returning 0.5 here would briefly exceed the
         default inertia threshold (0.4) during the first 1-2 matchmaker
-        emissions, falsely signalling that tracking has begun — which then
-        unlocks inertia extrapolation at 120 BPM even when no audio is
-        actually present.
+        emissions, falsely signalling that tracking has begun.
 
-        Three checks, all must pass:
-        1. Window-wide velocity within [_MIN_VELOCITY_FOR_CONFIDENCE,
+        Two checks, both must pass:
+        1. At least ``_MIN_HISTORY_FOR_CONFIDENCE`` samples in the history
+           window (the matcher is actually running, not in warm-up).
+        2. Window-wide velocity within [_MIN_VELOCITY_FOR_CONFIDENCE,
            _MAX_VELOCITY_FOR_CONFIDENCE].  Rejects stalls and runaway matches.
-        2. Sub-window means populated (>= _MIN_POPULATED_SUBWINDOWS sub-windows
-           with at least 2 samples).  Insufficient sub-window coverage means
-           we cannot judge stability — fail closed.
-        3. Coefficient of variation across sub-window mean velocities
-           <= _SUBWINDOW_CV_TO_ZERO.  Real tracking has consistent
-           sub-window means; irrelevant audio scatters them.
 
-        Why sub-window means rather than per-frame velocity: pymatchmaker
-        bursts (many frames in milliseconds, then blocks).  A single
-        sub-window absorbs one or two bursts so its *mean* velocity is
-        smooth, while window-scale instability (irrelevant audio jumping
-        around) still shows up as CV across sub-windows.
+        See the module docstring for why we no longer try to filter on
+        sub-window stability: live performance trivially fails such checks
+        during expressive playing, and the InertiaEngine then takes over
+        with stale-tempo extrapolation, which is the bug we're fixing.
         """
         history = self._beat_history
         if len(history) < _MIN_HISTORY_FOR_CONFIDENCE:
@@ -357,41 +347,6 @@ class MatchMaker:
             logger.debug(
                 "confidence=0: velocity %.2f exceeds max %.2f (runaway match?)",
                 velocity, _MAX_VELOCITY_FOR_CONFIDENCE,
-            )
-            return 0.0
-
-        subwindow_size = elapsed / _SUBWINDOW_COUNT
-        subwindow_velocities = []
-        for i in range(_SUBWINDOW_COUNT):
-            t_lo = oldest_time + i * subwindow_size
-            t_hi = oldest_time + (i + 1) * subwindow_size
-            in_sub = [(t, b) for (t, b) in history if t_lo <= t <= t_hi]
-            if len(in_sub) < 2:
-                continue
-            t0, b0 = in_sub[0]
-            t1, b1 = in_sub[-1]
-            dt = t1 - t0
-            if dt <= 0:
-                continue
-            subwindow_velocities.append((b1 - b0) / dt)
-
-        if len(subwindow_velocities) < _MIN_POPULATED_SUBWINDOWS:
-            return 0.0
-
-        v_mean = statistics.fmean(subwindow_velocities)
-        if v_mean <= 0:
-            return 0.0
-        v_std = (
-            statistics.pstdev(subwindow_velocities)
-            if len(subwindow_velocities) > 1 else 0.0
-        )
-        cv = v_std / v_mean
-        if cv > _SUBWINDOW_CV_TO_ZERO:
-            logger.debug(
-                "confidence=0: sub-window CV %.2f > %.2f "
-                "(velocities=%s)",
-                cv, _SUBWINDOW_CV_TO_ZERO,
-                [f"{v:.2f}" for v in subwindow_velocities],
             )
             return 0.0
 

@@ -97,6 +97,11 @@ class SequentialFollower:
         self._trigger_thread: threading.Thread | None = None
         self._workers_stop = threading.Event()
 
+        # Throttle for the per-iteration diagnostic log in _state_sync_loop.
+        # The loop runs at _STATE_SYNC_HZ (20 Hz); logging every tick floods
+        # the -v output.  We emit a single summary line every ~1 s instead.
+        self._last_state_diag_log = 0.0
+
         logger.info("SequentialFollower initialization complete")
 
     # ----------------------------------------------------- lifecycle
@@ -315,6 +320,20 @@ class SequentialFollower:
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
+
+                # Rate-limited diagnostic line: lets the operator reconstruct
+                # the matcher/gate behaviour after a rehearsal from -v logs
+                # without having to add ad-hoc prints next time.
+                now = time.time()
+                if now - self._last_state_diag_log >= 1.0:
+                    logger.debug(
+                        "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
+                        "mic_db=%.1f gate=%s locked=%s",
+                        raw_beat, beat, measure, raw_conf,
+                        mic_level_db, gate_active,
+                        self.inertia.is_locked_in(),
+                    )
+                    self._last_state_diag_log = now
 
             except Exception as exc:  # noqa: BLE001 — keep the thread alive
                 logger.error("State-sync error: %s", exc, exc_info=True)

@@ -47,7 +47,7 @@ python compressor.py -c compressor_config.json --weight-rhythm 5.0
 - ✅ `feature_extractor.py` - Chroma feature extraction
 - ✅ `matcher.py` - DTW matching (mock implementation)
 - ✅ `state_manager.py` - Thread-safe state
-- ✅ `inertia_engine.py` - Confidence-based fallback
+- ✅ `inertia_engine.py` - Tracking lock-in gate (holds last confident beat; no extrapolation)
 - ✅ `cooldown_timer.py` - Trigger rate limiting
 - ✅ `gui_tkinter.py` - Real-time display
 - ✅ `config/loader.py` - JSON configuration
