@@ -62,6 +62,58 @@ class ScoreMapper:
         self._build_beat_map()
         logger.info(f"Built beat map with {len(self.beat_thresholds)} measures")
 
+    def _get_measure_time_signature(self, measure) -> tuple[int, int]:
+        """Return (numerator, denominator) for the time signature of ``measure``.
+
+        partitura exposes time signatures in two different shapes depending on
+        version / access path:
+
+        - ``measure.time_signature`` may not exist at all, or may return an
+          object with ``.beats`` and ``.beat_type`` attributes.
+        - ``part.time_signature_map(t)`` (the path actually used in practice)
+          returns a ``numpy.ndarray`` of shape ``(3,)`` like ``[beats,
+          beat_type, beats_per_measure_in_unit]`` — the third element is the
+          number of pulse-unit beats per measure in compound time and we
+          ignore it; only the first two carry the time-signature numerator and
+          denominator.
+
+        If we cannot recognise the representation we warn loudly and fall back
+        to 4/4.  Silent fallback was a long-standing bug: every score we ever
+        loaded was secretly treated as 4/4 because the ``ndarray`` case was
+        not handled, and triggers fired at half the expected rate on 2/4
+        pieces (see issue #29).
+        """
+        ts = None
+        if hasattr(measure, 'time_signature'):
+            ts = measure.time_signature
+        elif hasattr(self.part, 'time_signature_map'):
+            start_t = measure.start.t if hasattr(measure, 'start') and hasattr(measure.start, 't') else 0
+            ts_map = self.part.time_signature_map
+            if ts_map:
+                ts = ts_map(start_t) if callable(ts_map) else ts_map.get(start_t)
+
+        if ts is None:
+            logger.warning(
+                "Time signature missing for measure %r; assuming 4/4",
+                getattr(measure, 'name', '?'),
+            )
+            return 4, 4
+
+        if hasattr(ts, 'beats') and hasattr(ts, 'beat_type'):
+            return int(ts.beats), int(ts.beat_type)
+        if isinstance(ts, tuple) and len(ts) >= 2:
+            return int(ts[0]), int(ts[1])
+        # numpy.ndarray and any other indexable [beats, beat_type, ...] form.
+        if hasattr(ts, '__len__') and len(ts) >= 2:
+            return int(ts[0]), int(ts[1])
+
+        logger.warning(
+            "Unrecognized time signature representation %r (type=%s) for "
+            "measure %r; assuming 4/4 — measure/beat mapping will be wrong",
+            ts, type(ts).__name__, getattr(measure, 'name', '?'),
+        )
+        return 4, 4
+
     def _build_beat_map(self):
         """
         Iterate through all measures, accumulate beats, build lookup map.
@@ -113,22 +165,7 @@ class ScoreMapper:
             d = getattr(m, 'duration', None)
             if not (d and d > 0):
                 continue
-            ts = None
-            if hasattr(m, 'time_signature'):
-                ts = m.time_signature
-            elif hasattr(self.part, 'time_signature_map'):
-                start_t = m.start.t if hasattr(m, 'start') and hasattr(m.start, 't') else 0
-                ts_map = self.part.time_signature_map
-                if ts_map:
-                    ts = ts_map(start_t) if callable(ts_map) else ts_map.get(start_t)
-            if ts is None:
-                ts = (4, 4)
-            if hasattr(ts, 'beats') and hasattr(ts, 'beat_type'):
-                n, dn = ts.beats, ts.beat_type
-            elif isinstance(ts, tuple):
-                n, dn = ts
-            else:
-                n, dn = 4, 4
+            n, dn = self._get_measure_time_signature(m)
             beats = (n / dn) * 4.0
             if beats > 0:
                 dur_ts_counter[(int(d), beats)] += 1
@@ -156,27 +193,7 @@ class ScoreMapper:
             except (TypeError, ValueError):
                 measure_num = len(self.beat_thresholds) + 1
 
-            # Get time signature - try different access patterns
-            ts = None
-            if hasattr(measure, 'time_signature'):
-                ts = measure.time_signature
-            elif hasattr(self.part, 'time_signature_map'):
-                # Get time signature at measure start
-                start_t = measure.start.t if hasattr(measure, 'start') and hasattr(measure.start, 't') else 0
-                ts_map = self.part.time_signature_map
-                if ts_map:
-                    ts = ts_map(start_t) if callable(ts_map) else ts_map.get(start_t)
-
-            if ts is None:
-                ts = (4, 4)  # Default fallback
-
-            # Handle different time signature formats
-            if hasattr(ts, 'beats') and hasattr(ts, 'beat_type'):
-                num, denom = ts.beats, ts.beat_type
-            elif isinstance(ts, tuple):
-                num, denom = ts
-            else:
-                num, denom = 4, 4
+            num, denom = self._get_measure_time_signature(measure)
 
             # Nominal beat count from time signature (stored for beat_in_measure calc)
             beats_per_measure = (num / denom) * 4.0
