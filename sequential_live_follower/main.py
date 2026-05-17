@@ -251,6 +251,7 @@ class SequentialFollower:
                 score_file=xml_file,
                 input_type="audio",
                 device_name_or_index=self.config.get_mic_device(),
+                extra_kwargs=self.config.get_matcher_kwargs(),
             )
             self.matcher.start()
         except Exception as exc:  # noqa: BLE001

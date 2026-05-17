@@ -103,6 +103,7 @@ class MatchMaker:
         device_name_or_index: Optional[Union[str, int]] = None,
         method: str = "arzt",
         feature_type: str = "chroma",
+        extra_kwargs: Optional[dict] = None,
     ) -> None:
         """
         Args:
@@ -113,12 +114,28 @@ class MatchMaker:
                 input, "arzt" or "dixon" are valid; "hmm" is MIDI-only.
             feature_type: Audio feature type ("chroma", "mfcc", "mel",
                 "logspectral").
+            extra_kwargs: Optional dict forwarded to ``Matchmaker(kwargs=...)``.
+                Used to tune the underlying online DTW algorithm.  Common keys
+                (see matchmaker.dp.oltw_arzt.OnlineTimeWarpingArzt):
+
+                * ``start_window_size`` (float, default 0.1): fraction of the
+                  score the initial position search can wander over.  At the
+                  default, on a 24-measure score the matcher can lock onto any
+                  point in the first ~5 seconds of the reference — disastrous
+                  for music with repeating motifs (Beethoven 5 opening).
+                  Setting this to ``0.02`` narrows the search to ~1 second.
+                * ``step_size`` (int, default 3): max reference-frame advance
+                  per input frame.  Lowering to ``1`` makes the alignment
+                  more conservative (less prone to racing ahead on noise).
+                * ``window_size`` (int, default 10): DP search radius around
+                  the current position for steady-state tracking.
         """
         self.score_file = score_file
         self.input_type = input_type
         self.device_name_or_index = device_name_or_index
         self.method = method
         self.feature_type = feature_type
+        self.extra_kwargs = dict(extra_kwargs) if extra_kwargs else {}
 
         # Thread-safe state
         self._lock = threading.Lock()
@@ -279,6 +296,29 @@ class MatchMaker:
 
             logger.info("Instantiating Matchmaker(%s)", mm_kwargs)
             self._mm = Matchmaker(**mm_kwargs)
+
+            # Tune the OLTW score follower in place.  pymatchmaker 0.2.1 does
+            # *not* forward tuning params from Matchmaker() to OnlineTimeWarpingArzt(),
+            # so the only way to change ``window_size`` / ``step_size`` /
+            # ``start_window_size`` is to patch the score_follower object after
+            # construction.  The algorithm reads these via ``self.*`` on each
+            # step (oltw_arzt.py:215, 264) so the change takes effect from the
+            # next frame.  Defaults of (window_size=5s, step_size=5) are far
+            # too permissive for repeating motifs (e.g. Beethoven 5 opening)
+            # and cause the alignment to race ahead at startup.
+            if self.extra_kwargs and hasattr(self._mm, "score_follower"):
+                sf = self._mm.score_follower
+                for key, value in self.extra_kwargs.items():
+                    if hasattr(sf, key):
+                        old = getattr(sf, key)
+                        setattr(sf, key, value)
+                        logger.info(
+                            "Patched score_follower.%s: %r → %r", key, old, value,
+                        )
+                    else:
+                        logger.warning(
+                            "score_follower has no attribute %r; skipped tuning", key,
+                        )
         except Exception as exc:  # noqa: BLE001 — surface any startup error
             self._fatal_error = exc
             logger.error("Matchmaker construction failed: %s", exc, exc_info=True)

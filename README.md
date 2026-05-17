@@ -188,6 +188,7 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 | `silence_threshold_db` | `-55.0` | この dBFS 以下のマイク入力を無音と判定し確信度を 0 にする |
 | `inertia_timeout_seconds` | `5.0` | 互換のため残存。現バージョンでは外挿しないため未使用 |
 | `mic_device` | `"pulse"` | 音声入力デバイス。WSL2 では `"pulse"` が標準。整数インデックスまたはデバイス名も指定可 |
+| `matcher_kwargs` | `{window_size: 30, step_size: 1, start_window_size: 8}` | pymatchmaker OLTW Arzt の探索パラメータ。デフォルトは繰り返しモチーフ (例: Beethoven 5) で起動暴走を抑える設定。`window_size` は steady-state の探索フレーム数 (30 fps なので 30 = 1 秒)、`step_size` は 1 入力フレームあたりの最大 ref-frame 前進数、`start_window_size` は起動時の探索幅 (フレーム単位) |
 
 **triggers フィールド**
 
