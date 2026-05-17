@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
@@ -100,7 +101,13 @@ class SequentialFollower:
         # Throttle for the per-iteration diagnostic log in _state_sync_loop.
         # The loop runs at _STATE_SYNC_HZ (20 Hz); logging every tick floods
         # the -v output.  We emit a single summary line every ~1 s instead.
+        # If env var SLF_VERBOSE_SYNC=1 is set, the throttle is bypassed and
+        # every iteration is logged — useful for diagnosing ratio/jitter
+        # issues at the full state-sync rate.
         self._last_state_diag_log = 0.0
+        self._verbose_sync = os.environ.get("SLF_VERBOSE_SYNC", "").strip() == "1"
+        if self._verbose_sync:
+            logger.info("SLF_VERBOSE_SYNC=1 → state-sync DEBUG log un-throttled (20 Hz)")
 
         logger.info("SequentialFollower initialization complete")
 
@@ -321,11 +328,11 @@ class SequentialFollower:
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
 
-                # Rate-limited diagnostic line: lets the operator reconstruct
-                # the matcher/gate behaviour after a rehearsal from -v logs
-                # without having to add ad-hoc prints next time.
+                # Diagnostic line.  Throttled to 1 Hz by default so the -v
+                # output stays readable; set SLF_VERBOSE_SYNC=1 to emit at
+                # the full state-sync rate (20 Hz) for ratio/jitter analysis.
                 now = time.time()
-                if now - self._last_state_diag_log >= 1.0:
+                if self._verbose_sync or now - self._last_state_diag_log >= 1.0:
                     logger.debug(
                         "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
                         "mic_db=%.1f gate=%s locked=%s",

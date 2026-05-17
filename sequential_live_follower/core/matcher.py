@@ -53,9 +53,11 @@ module is the single place that needs to change.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from typing import Deque, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,30 @@ class MatchMaker:
         # and we want stream lifetime tied to the worker thread.
         self._mm = None
 
+        # Optional raw-beat CSV trace.  Enabled by setting the env var
+        # SLF_BEAT_LOG=<path>.  Writes one row per pymatchmaker emission so
+        # we can correlate displayed beat against wall-clock time during a
+        # rehearsal — used to diagnose ratio mismatches (e.g. the GUI
+        # advancing 2x faster than the music) without modifying code.
+        # The file is line-buffered and protected by its own lock so the
+        # main beat lock is not held across I/O.
+        self._beat_log_path = os.environ.get("SLF_BEAT_LOG", "").strip() or None
+        self._beat_log_fp = None
+        self._beat_log_lock = threading.Lock()
+        if self._beat_log_path:
+            try:
+                self._beat_log_fp = open(self._beat_log_path, "a", buffering=1, encoding="utf-8")
+                if self._beat_log_fp.tell() == 0:
+                    self._beat_log_fp.write("wall_iso,monotonic_s,raw_beat,score_file\n")
+                logger.info("Beat CSV trace enabled: %s", self._beat_log_path)
+            except OSError as exc:
+                logger.warning(
+                    "Could not open SLF_BEAT_LOG=%s for writing (%s); "
+                    "beat tracing disabled",
+                    self._beat_log_path, exc,
+                )
+                self._beat_log_fp = None
+
         logger.info(
             "MatchMaker configured: score=%s input=%s method=%s feature=%s device=%s",
             score_file, input_type, method, feature_type, device_name_or_index,
@@ -181,6 +207,16 @@ class MatchMaker:
 
         self._mm = None
         self._thread = None
+
+        # Close the beat CSV trace last so any final flush happens after the
+        # worker thread has joined.
+        if self._beat_log_fp is not None:
+            try:
+                self._beat_log_fp.close()
+            except OSError:
+                pass
+            self._beat_log_fp = None
+
         logger.info("MatchMaker stopped")
 
     def wait_ready(self, timeout: float = 10.0) -> bool:
@@ -292,6 +328,7 @@ class MatchMaker:
     def _update(self, beat: float) -> None:
         """Record a new beat reading and recompute confidence."""
         now = time.time()
+        mono = time.monotonic()
 
         with self._lock:
             self._latest_beat = beat
@@ -307,6 +344,16 @@ class MatchMaker:
             confidence = self._latest_confidence  # capture before releasing lock
 
         logger.debug("beat=%.3f conf=%.2f", beat, confidence)
+
+        # CSV trace (opt-in via SLF_BEAT_LOG).  Done outside the main lock so
+        # disk I/O cannot stall the main beat update path.
+        if self._beat_log_fp is not None:
+            try:
+                line = f"{datetime.fromtimestamp(now).isoformat()},{mono:.6f},{beat:.6f},{self.score_file}\n"
+                with self._beat_log_lock:
+                    self._beat_log_fp.write(line)
+            except (OSError, ValueError):
+                pass  # never let trace errors kill the matcher thread
 
         if not self._ready_event.is_set():
             self._ready_event.set()
