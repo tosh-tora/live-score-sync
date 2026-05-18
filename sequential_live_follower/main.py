@@ -109,6 +109,12 @@ class SequentialFollower:
         if self._verbose_sync:
             logger.info("SLF_VERBOSE_SYNC=1 → state-sync DEBUG log un-throttled (20 Hz)")
 
+        # Prior gate state so we can detect silent→active and active→silent
+        # transitions and freeze / unfreeze the matcher accordingly.  Without
+        # this, pymatchmaker silently drifts current_position forward during
+        # silence and the GUI jumps to a later measure when audio resumes.
+        self._prev_gate_active: bool = False
+
         logger.info("SequentialFollower initialization complete")
 
     # ----------------------------------------------------- lifecycle
@@ -317,6 +323,18 @@ class SequentialFollower:
                 gate_active = mic_available and not self.audio_monitor.is_active()
                 if gate_active:
                     raw_conf = 0.0
+
+                # Freeze / unfreeze the matcher on gate transitions so the
+                # DP doesn't drift forward through silence (see matcher.freeze
+                # for full rationale).  We only freeze after lock-in — before
+                # that there's nothing to preserve and freezing at frame 0
+                # would pin the matcher to the score start.
+                if gate_active != self._prev_gate_active:
+                    if gate_active and self.inertia.is_locked_in():
+                        matcher.freeze()
+                    elif not gate_active:
+                        matcher.unfreeze()
+                    self._prev_gate_active = gate_active
 
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)

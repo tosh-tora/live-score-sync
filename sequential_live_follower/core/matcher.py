@@ -142,6 +142,15 @@ class MatchMaker:
         self._latest_beat: float = 0.0
         self._latest_confidence: float = 0.0
         self._latest_update_time: float = time.time()
+
+        # Silence-freeze: when the mic is silent, the upstream score-sync loop
+        # calls freeze() to pin the matcher's reference position.  pymatchmaker
+        # otherwise keeps consuming audio frames and drifting current_position
+        # forward; on resume that drifted position is reported and the GUI
+        # jumps ahead.  When _frozen_frame is set, _update() snaps
+        # score_follower.current_position back to it on every emission, so
+        # DTW restarts from the same place when audio returns.
+        self._frozen_frame: Optional[int] = None
         self._beat_history: Deque[Tuple[float, float]] = deque()  # (timestamp, beat)
 
         # Lifecycle
@@ -245,6 +254,35 @@ class MatchMaker:
         """
         return self._ready_event.wait(timeout)
 
+    def freeze(self) -> None:
+        """Pin the score follower's current_position to its present value.
+
+        Used by the silence-gate path to prevent pymatchmaker from drifting
+        forward through the reference while the mic is silent.  Without this,
+        the algorithm keeps consuming audio frames (silence/noise) and the
+        DP search steadily advances current_position; when sound returns the
+        matcher reports a position several beats ahead of where the music
+        actually picked up, and the GUI jumps forward on resume.
+
+        Idempotent — calling freeze() while already frozen leaves the pinned
+        frame unchanged.
+        """
+        if self._mm is None or not hasattr(self._mm, "score_follower"):
+            return
+        with self._lock:
+            if self._frozen_frame is not None:
+                return  # already frozen, keep the original pin
+            self._frozen_frame = int(self._mm.score_follower.current_position)
+        logger.info("MatchMaker frozen at frame %d", self._frozen_frame)
+
+    def unfreeze(self) -> None:
+        """Release the pin so the score follower can advance again."""
+        with self._lock:
+            was_frozen = self._frozen_frame is not None
+            self._frozen_frame = None
+        if was_frozen:
+            logger.info("MatchMaker unfrozen — resuming forward tracking")
+
     @property
     def last_error(self) -> Optional[BaseException]:
         """Return the fatal error that stopped the worker, if any."""
@@ -332,6 +370,17 @@ class MatchMaker:
                 if self._stop_event.is_set():
                     logger.info("Stop event received, leaving run() loop")
                     break
+
+                # While frozen (silence gate), snap score_follower back to
+                # the pinned frame so DTW cannot drift forward through silence.
+                # Done immediately after each yield, before the next step()
+                # iteration begins.
+                frozen = self._frozen_frame  # snapshot without lock — int read is atomic
+                if frozen is not None and hasattr(self._mm, "score_follower"):
+                    try:
+                        self._mm.score_follower.current_position = frozen
+                    except Exception:  # noqa: BLE001 — never let intervention kill the loop
+                        pass
 
                 # current_position may be a float (beats) or, for newer
                 # versions, a richer object. Be defensive.
