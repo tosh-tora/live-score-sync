@@ -35,7 +35,9 @@ from pathlib import Path
 
 from sequential_live_follower.config.loader import ConfigError, ConfigLoader
 from sequential_live_follower.core.audio_level import AudioLevelMonitor
+from sequential_live_follower.core.audio_recorder import AudioRecorder
 from sequential_live_follower.core.cooldown_timer import CooldownTimer
+from sequential_live_follower.core.diag_logger import DiagLogger
 from sequential_live_follower.core.inertia_engine import InertiaEngine
 from sequential_live_follower.core.matcher import MatchMaker
 from sequential_live_follower.core.score_mapper import ScoreMapper
@@ -55,7 +57,13 @@ _TRIGGER_POLL_HZ = 20
 class SequentialFollower:
     """Top-level application orchestrator."""
 
-    def __init__(self, config_path: str, slide_url: str) -> None:
+    def __init__(
+        self,
+        config_path: str,
+        slide_url: str,
+        diag_dir: "Path | None" = None,
+        silence_threshold_db_override: "float | None" = None,
+    ) -> None:
         logger.info("Initializing SequentialFollower (config=%s)", config_path)
 
         self.config = ConfigLoader(config_path)
@@ -72,10 +80,43 @@ class SequentialFollower:
         # confidence to 0 so pymatchmaker's score-driven advance cannot
         # falsely lock in the InertiaEngine.  Must consume the same input
         # device as MatchMaker (see ConfigLoader.get_mic_device).
+        #
+        # CLI ``--silence-threshold-db`` overrides config.json so the
+        # operator can tighten the gate on-site without editing the file
+        # (which is awkward during rehearsal).  Logged so the running
+        # value is visible in -v output.
+        silence_threshold_db = (
+            silence_threshold_db_override
+            if silence_threshold_db_override is not None
+            else self.config.get_silence_threshold_db()
+        )
+        if silence_threshold_db_override is not None:
+            logger.info(
+                "silence_threshold_db = %.1f dBFS (CLI override; config value was %.1f)",
+                silence_threshold_db, self.config.get_silence_threshold_db(),
+            )
         self.audio_monitor = AudioLevelMonitor(
-            threshold_db=self.config.get_silence_threshold_db(),
+            threshold_db=silence_threshold_db,
             device=self.config.get_mic_device(),
         )
+
+        # Diagnostic recorders (only enabled when --diag-dir was passed).
+        # Both are tee'd off existing streams — no extra audio device is
+        # opened — so leaving --diag-dir off has zero runtime cost.
+        self.diag_dir = diag_dir
+        self.diag_logger: DiagLogger | None = None
+        self.audio_recorder: AudioRecorder | None = None
+        if diag_dir is not None:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.diag_logger = DiagLogger(diag_dir / f"diag_{stamp}.csv")
+            self.audio_recorder = AudioRecorder(
+                diag_dir / f"audio_{stamp}.wav",
+                sample_rate=self.audio_monitor.sample_rate,
+            )
+            # Tee mic blocks into the WAV recorder.  Registered before
+            # ``audio_monitor.start()`` so we don't miss the very first
+            # block on machines where the callback fires immediately.
+            self.audio_monitor.add_block_listener(self.audio_recorder.on_block)
 
         # Per-movement objects (recreated each load)
         self.score_mapper: ScoreMapper | None = None
@@ -186,6 +227,17 @@ class SequentialFollower:
 
         self.audio_monitor.stop()
         self.slide_controller.stop()
+
+        # Close diagnostic artifacts after the audio + matcher threads
+        # have stopped pushing data so the final CSV rows and WAV blocks
+        # are captured in full.
+        if self.audio_recorder is not None:
+            self.audio_recorder.close()
+            self.audio_recorder = None
+        if self.diag_logger is not None:
+            self.diag_logger.close()
+            self.diag_logger = None
+
         logger.info("Shutdown complete")
 
     # ---------------------------------------------------- movement loading
@@ -346,6 +398,32 @@ class SequentialFollower:
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
+
+                # Diagnostic CSV row (always full rate when --diag-dir is on).
+                # Written off-thread by DiagLogger so the 20 Hz state-sync
+                # cadence isn't disturbed.  We fetch the matcher's internal
+                # diagnostic snapshot once per tick — it's lock-protected and
+                # cheap.  Skipped entirely when --diag-dir wasn't passed.
+                if self.diag_logger is not None:
+                    diag = matcher.get_diagnostics()
+                    self.diag_logger.log({
+                        "raw_beat": raw_beat,
+                        "beat": beat,
+                        "measure": measure,
+                        "beat_in_measure": beat_in_measure,
+                        "raw_conf": raw_conf,
+                        "mic_db": mic_level_db,
+                        "gate_active": gate_active,
+                        "mic_available": mic_available,
+                        "matcher_frozen": diag.frozen,
+                        "matcher_frozen_frame": diag.frozen_frame,
+                        "locked_in": self.inertia.is_locked_in(),
+                        "inertia_active": inertia_active,
+                        "inertia_tempo_bpm": tempo,
+                        "history_len": diag.history_len,
+                        "win_velocity": diag.win_velocity,
+                        "stall_sec": diag.stall_sec,
+                    })
 
                 # Diagnostic line.  Throttled to 1 Hz by default so the -v
                 # output stays readable; set SLF_VERBOSE_SYNC=1 to emit at
@@ -512,6 +590,26 @@ def main() -> int:
         action="store_true",
         help="Enable DEBUG-level logging",
     )
+    parser.add_argument(
+        "--diag-dir",
+        type=Path,
+        default=None,
+        help=(
+            "診断ログ (CSV) と raw マイク音声 (WAV) の出力ディレクトリ。"
+            "指定しなければ何も出力しない。「ただの雑音で進行する」など、"
+            "現場でしか再現しない問題の原因切り分け用。"
+        ),
+    )
+    parser.add_argument(
+        "--silence-threshold-db",
+        type=float,
+        default=None,
+        help=(
+            "config.json の silence_threshold_db を上書きする (dBFS)。"
+            "現場で雑音通過の閾値を即座に詰めるための調整スイッチ。"
+            "例: --silence-threshold-db -40 で -40 dBFS 以下を無音扱い"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -531,8 +629,25 @@ def main() -> int:
         logger.error("Config file not found: %s", config_path)
         return 1
 
+    # Validate / prepare the diagnostic output directory up front so the
+    # operator gets a clear error before any audio threads are spawned.
+    diag_dir: Path | None = None
+    if args.diag_dir is not None:
+        diag_dir = args.diag_dir.expanduser().resolve()
+        try:
+            diag_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error("--diag-dir を作成できません: %s (%s)", diag_dir, exc)
+            return 1
+        logger.info("Diagnostic capture enabled → %s", diag_dir)
+
     try:
-        app = SequentialFollower(str(config_path), slide_url=args.slide_url)
+        app = SequentialFollower(
+            str(config_path),
+            slide_url=args.slide_url,
+            diag_dir=diag_dir,
+            silence_threshold_db_override=args.silence_threshold_db,
+        )
         app.run()
         return 0
     except ConfigError as exc:

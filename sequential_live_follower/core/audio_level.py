@@ -19,9 +19,16 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from typing import Optional, Union
+from typing import Callable, List, Optional, Union
 
 import numpy as np
+
+# Type alias for raw audio block listeners.  Receives a 1-D float32 mono
+# array of samples plus the sample rate.  Listeners run inside the
+# sounddevice callback thread, so they must be cheap and never raise — the
+# monitor wraps each call in try/except for safety, but a slow listener
+# would still starve the audio thread and cause underruns.
+AudioBlockListener = Callable[[np.ndarray, int], None]
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +58,12 @@ class AudioLevelMonitor:
         self._current_db: float = -math.inf
         self._stream = None  # sounddevice.InputStream when running
         self._available = False  # set True after a successful start()
+
+        # Optional listeners that get the raw audio block on every callback.
+        # Used by the diagnostic AudioRecorder to tee the input stream into a
+        # .wav file without opening a third audio device.  Empty by default
+        # so the production code path is zero-overhead.
+        self._listeners: List[AudioBlockListener] = []
 
     # ---------------------------------------------------------- lifecycle
     def start(self, timeout_sec: float = 10.0) -> None:
@@ -167,6 +180,22 @@ class AudioLevelMonitor:
         with self._lock:
             return self._current_db
 
+    # -------------------------------------------------------- listeners
+    def add_block_listener(self, fn: AudioBlockListener) -> None:
+        """Register ``fn(samples, sample_rate)`` to receive every audio block.
+
+        Used to tee the input stream into a second consumer (e.g. a .wav
+        recorder for diagnostics) without opening a third audio device,
+        which would conflict on Windows / some Linux configurations.
+
+        The listener runs inside the sounddevice callback thread.  It MUST
+        be cheap (queue.put_nowait is fine; disk I/O is not) and is wrapped
+        in try/except so any error is logged and swallowed rather than
+        killing the monitor.
+        """
+        with self._lock:
+            self._listeners.append(fn)
+
     # ----------------------------------------------------------- private
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ARG002 — sd signature
         if status:
@@ -184,6 +213,22 @@ class AudioLevelMonitor:
 
         with self._lock:
             self._current_db = db
+            listeners = list(self._listeners)  # snapshot to release the lock
+
+        # Fan out raw samples to any tee'd consumers (e.g. AudioRecorder).
+        # We copy the buffer because sounddevice reuses the underlying
+        # memory for the next callback and listeners typically queue the
+        # array for later disk I/O.
+        if listeners:
+            samples_copy = samples.copy()
+            for fn in listeners:
+                try:
+                    fn(samples_copy, self.sample_rate)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "AudioLevelMonitor: block listener %r raised; dropping block",
+                        fn,
+                    )
 
     def __repr__(self) -> str:
         return (

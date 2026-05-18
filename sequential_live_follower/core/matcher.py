@@ -57,6 +57,7 @@ import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Deque, Optional, Tuple, Union
 
@@ -80,6 +81,31 @@ _MIN_VELOCITY_FOR_CONFIDENCE = 0.5
 # spurious matches in irrelevant audio and race through the score; this cap
 # rejects those. 5 beats/sec = 300 BPM — above any realistic orchestral tempo.
 _MAX_VELOCITY_FOR_CONFIDENCE = 5.0
+
+
+@dataclass(frozen=True)
+class MatcherDiagnostics:
+    """Read-only snapshot of MatchMaker internal state for diagnostic logging.
+
+    Exposed via ``MatchMaker.get_diagnostics()`` so the state-sync loop can
+    correlate confidence drops with the underlying causes (history length,
+    window velocity, stall, freeze) without reaching into private fields.
+    Cheap to construct — read once per state-sync tick (20 Hz).
+    """
+    history_len: int
+    """Number of (timestamp, beat) samples currently in the confidence window."""
+
+    win_velocity: float
+    """Window-wide endpoint velocity (beats/sec). NaN if too few samples."""
+
+    stall_sec: float
+    """Seconds since the last beat update; > _STALL_TIMEOUT_SEC forces conf=0."""
+
+    frozen: bool
+    """True if the silence-gate path has pinned the score follower's position."""
+
+    frozen_frame: Optional[int]
+    """The pinned reference frame when frozen, else None."""
 
 
 class MatchMaker:
@@ -298,6 +324,43 @@ class MatchMaker:
             else:
                 confidence = self._latest_confidence
             return self._latest_beat, confidence
+
+    def get_diagnostics(self) -> MatcherDiagnostics:
+        """Snapshot internal state for the diagnostic CSV log.
+
+        Returns the same fields that ``_estimate_confidence_locked`` reasons
+        over, plus the freeze state, so a single CSV row can answer
+        "why was confidence 0/1 at this moment?" after the fact.
+
+        Cheap and lock-protected — safe to call at the state-sync rate.
+        Returns NaN for ``win_velocity`` when fewer than 2 samples are
+        in the history (no velocity defined yet).
+        """
+        with self._lock:
+            history = self._beat_history
+            history_len = len(history)
+            stall_sec = time.time() - self._latest_update_time
+
+            if history_len >= 2:
+                oldest_time, oldest_beat = history[0]
+                newest_time, newest_beat = history[-1]
+                elapsed = newest_time - oldest_time
+                win_velocity = (
+                    (newest_beat - oldest_beat) / elapsed
+                    if elapsed > 0 else float("nan")
+                )
+            else:
+                win_velocity = float("nan")
+
+            frozen_frame = self._frozen_frame
+
+        return MatcherDiagnostics(
+            history_len=history_len,
+            win_velocity=win_velocity,
+            stall_sec=stall_sec,
+            frozen=frozen_frame is not None,
+            frozen_frame=frozen_frame,
+        )
 
     def reset(self) -> None:
         """Reset cached state (used between movements before re-start())."""
