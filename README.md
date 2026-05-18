@@ -32,7 +32,7 @@ live-score-sync/
 │   │   ├── slide_controller.py        # Playwright (Google Slides 制御)
 │   │   ├── score_mapper.py            # 拍 ↔ 小節変換 (partitura)
 │   │   ├── state_manager.py           # スレッドセーフ状態管理
-│   │   ├── inertia_engine.py          # 信頼度低下時の慣性補外
+│   │   ├── inertia_engine.py          # 追従ロックインゲート（低信頼度時は直前拍を保持）
 │   │   └── cooldown_timer.py          # トリガー連発防止
 │   ├── ui/
 │   │   └── gui_tkinter.py             # 操作 GUI
@@ -118,7 +118,7 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 | ♩ X.XX | 小節内の拍位置（1拍目 = 1.00） |
 | 確信度バー | 追従の確かさ（緑 > 60%・橙 > 40%・赤 ≤ 40%） |
 | 次のトリガー | 次にスライドが動く小節番号 |
-| ⚠ 慣性モード（推定） | 確信度が低く、直前テンポで仮想進行中 |
+| ⚠ 慣性モード（推定） | 互換のため残存（現バージョンでは常に非表示）|
 | 🔒 クールダウン中 | トリガー連発防止のロック中 |
 | マイク: XX dBFS | リアルタイムマイクレベルと無音判定状態 |
 
@@ -126,8 +126,8 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 
 - マイク入力 (`pymatchmaker` 内部の audio frontend)
 - DTW ベース拍追跡 (`pymatchmaker.Matchmaker.run()`)
-- サブウィンドウ CV による追従信頼度推定（無関係な音・無音での誤発火防止）
-- 信頼度低下時の慣性モード (直前のテンポで仮想進行)
+- ウィンドウ拍速度による追従信頼度推定（無関係な音・無音での誤発火防止）
+- 低信頼度時は直前の確信できた拍位置を保持（外挿はせず、pymatchmaker の DTW 復帰を待つ）
 - 小節精度トリガー実行 + クールダウンによる誤発火防止
 - 起動時の config.json バリデーション（構文エラー・必須項目欠如を即座に報告して終了）
 - スコアファイル未検出時の配置先ガイダンス表示
@@ -184,10 +184,11 @@ Chromium をプロジェクタ側モニタにドラッグして F11 でフルス
 | フィールド | デフォルト | 説明 |
 |-----------|-----------|------|
 | `cooldown_seconds` | `3.0` | トリガー発火後の再発火抑止時間（秒） |
-| `confidence_threshold` | `0.4` | これを下回ると慣性モードへ移行 |
+| `confidence_threshold` | `0.4` | これを下回ると拍位置を直前値で保持する（外挿はしない） |
 | `silence_threshold_db` | `-55.0` | この dBFS 以下のマイク入力を無音と判定し確信度を 0 にする |
-| `inertia_timeout_seconds` | `5.0` | 慣性モードのタイムアウト（秒）。超過すると追従待機に戻る |
+| `inertia_timeout_seconds` | `5.0` | 互換のため残存。現バージョンでは外挿しないため未使用 |
 | `mic_device` | `"pulse"` | 音声入力デバイス。WSL2 では `"pulse"` が標準。整数インデックスまたはデバイス名も指定可 |
+| `matcher_kwargs` | `{window_size: 30, step_size: 1, start_window_size: 8}` | pymatchmaker OLTW Arzt の探索パラメータ。デフォルトは繰り返しモチーフ (例: Beethoven 5) で起動暴走を抑える設定。`window_size` は steady-state の探索フレーム数 (30 fps なので 30 = 1 秒)、`step_size` は 1 入力フレームあたりの最大 ref-frame 前進数、`start_window_size` は起動時の探索幅 (フレーム単位) |
 
 **triggers フィールド**
 
@@ -283,7 +284,7 @@ Matchmaker.run() ── beat ──→ MatchMaker.get_latest()
 | Chromium がクラッシュ | `playwright install chromium` 未実行 |
 | トリガーでスライドが進まない | Chromium ウィンドウをクリックしてフォーカス、F11 でプレゼンモード化 |
 | GUI に「マイク: 監視無効」と表示される | sounddevice がマイクを開けなかった。上記「sounddevice にデバイスが表示されない」を参照 |
-| 確信度が常に低い / 慣性モードが続く | マイクゲイン調整、`confidence_threshold` を下げる、スコアが実演奏曲と一致しているか確認 |
+| 確信度が常に低い / 拍が直前値で止まったまま | マイクゲイン調整、`confidence_threshold` を下げる、スコアが実演奏曲と一致しているか確認 |
 | 演奏途中で認識が止まった | `R` キーで現在楽章を再ロード。改善しない場合は `N` → 前の楽章に戻す操作はできないので再起動 |
 | `N` キーや `R` キーが効かない | 操作 GUI ウィンドウにフォーカスを当てる |
 

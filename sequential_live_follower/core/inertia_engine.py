@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
 """
-inertia_engine.py - Confidence-Based Beat Extrapolation
+inertia_engine.py - Tracking Lock-in Gate (no extrapolation)
 
-When matcher confidence drops, maintains playback continuity by extrapolating beat
-position using the last known tempo. Prevents stalling or wild jumps.
+Despite the name (kept for import-compatibility with main.py / state_manager
+/ GUI), this module no longer extrapolates beat position from a stale
+tempo estimate.  Live experiments showed extrapolation racing ahead of
+the conductor during expressive passages, then snapping back to measure 1
+when the timeout elapsed — i.e. exactly the bug we are now avoiding.
+
+Current behaviour:
+
+- ``confidence >= threshold``: return the matcher's current beat verbatim
+  and learn the tempo (so the GUI can still display it).
+- ``confidence < threshold`` before lock-in: hold beat at 0 (so the
+  measure-1 trigger does not fire before any music is detected).
+- ``confidence < threshold`` after lock-in: **hold the last confident
+  beat** unchanged.  We trust pymatchmaker's DTW to resume tracking on
+  its own when audio quality improves; freezing the displayed position
+  is honest visual feedback and never wrong by more than the matcher's
+  own latency.
+
+``inertia_active`` is always False going forward, but the field is kept
+so that ``state_manager.set_inertia_mode`` and the GUI label keep working
+without changes.
 """
 
 import logging
@@ -25,17 +44,16 @@ _HEARTBEAT_INTERVAL_SEC = 5.0
 # Internal state labels used to decide when to emit a transition log.
 _STATE_WAITING = "waiting"
 _STATE_TRACKING = "tracking"
-_STATE_INERTIA = "inertia"
+_STATE_HOLD = "hold"  # post-lock-in, confidence currently low — hold last beat
 
 
 class InertiaEngine:
     """
-    Fallback beat extrapolation when matching confidence is low.
+    Tracking lock-in gate (legacy name).
 
-    When confidence > threshold: trust matcher output, learn tempo
-    When confidence ≤ threshold: extrapolate using last known tempo
-
-    This ensures smooth playback even during difficult audio passages.
+    When confidence is high, we forward the matcher's beat verbatim and
+    learn the tempo for display.  When confidence is low we hold the last
+    confident beat (or stay at 0 before lock-in).  No extrapolation.
     """
 
     def __init__(
@@ -44,16 +62,17 @@ class InertiaEngine:
         inertia_timeout_sec: float = 5.0,
     ):
         """
-        Initialize inertia engine.
+        Initialize the gate.
 
         Args:
-            confidence_threshold: Threshold below which inertia activates (0.0-1.0)
-            inertia_timeout_sec: After this many seconds of sustained low
-                confidence, the engine resets to the waiting-for-tracking
-                state.  Prevents a stale lock-in from driving slides forever.
+            confidence_threshold: Threshold below which we hold position
+                instead of forwarding the matcher's beat (0.0-1.0)
+            inertia_timeout_sec: Accepted for backward compatibility with
+                callers / config.json.  No longer used — there is no
+                extrapolation timeout to enforce.
         """
         self.confidence_threshold = confidence_threshold
-        self.inertia_timeout_sec = inertia_timeout_sec
+        self.inertia_timeout_sec = inertia_timeout_sec  # retained for API stability
 
         # Last high-confidence state
         self.last_confident_beat = 0.0
@@ -81,14 +100,16 @@ class InertiaEngine:
         confidence: float
     ) -> Tuple[float, bool, float]:
         """
-        Update with matcher output, decide whether to use it or inertia.
+        Update with matcher output, forward or hold the beat.
 
         Args:
             current_beat: Beat from pymatchmaker
-            confidence: DTW confidence score [0.0, 1.0]
+            confidence: Wrapper-derived confidence in [0.0, 1.0]
 
         Returns:
-            (beat_to_use, inertia_active, estimated_tempo_bpm)
+            (beat_to_use, inertia_active, estimated_tempo_bpm).
+            ``inertia_active`` is always False; the field is kept so the
+            GUI / state_manager continue to work unchanged.
         """
         now = time.time()
 
@@ -110,7 +131,7 @@ class InertiaEngine:
             # Streak-based lock-in: only mark "tracking has begun" after
             # several consecutive confident frames.  Until then, treat the
             # frame as confident for display purposes but do NOT unlock the
-            # inertia engine — so a single noisy frame can't trigger drift.
+            # trigger gate — so a single noisy frame can't fire slides.
             self._confident_streak += 1
             if (
                 not self._has_ever_matched
@@ -130,55 +151,29 @@ class InertiaEngine:
             )
             return current_beat, False, self.last_tempo_bpm
 
-        else:
-            # Confidence below threshold: reset the streak.
-            self._confident_streak = 0
+        # Confidence below threshold: reset the streak so a future
+        # recovery has to re-prove itself before firing triggers.
+        self._confident_streak = 0
+        self.inertia_active = False
 
-            # Use inertia — but only if tracking has clearly started.
-            # Before lock-in we hold position at beat 0 so slides do not fire
-            # before any music is detected.
-            if not self._has_ever_matched:
-                self.inertia_active = False
-                self._log_state(
-                    _STATE_WAITING, now, confidence,
-                    "holding beat 0 until tracking locks in",
-                )
-                return 0.0, False, self.last_tempo_bpm
-
-            delta_time = now - self.last_confident_time
-
-            # Defensive timeout: a stale lock-in must not drive slides
-            # forever.  If we have been below threshold for too long, drop
-            # back into the waiting state so the operator sees measure 1
-            # and no triggers fire until real tracking returns.
-            if delta_time > self.inertia_timeout_sec:
-                logger.warning(
-                    "Inertia timeout: no confident match for %.1fs (> %.1fs); "
-                    "resetting tracking state",
-                    delta_time, self.inertia_timeout_sec,
-                )
-                self._has_ever_matched = False
-                self._confident_streak = 0
-                self.inertia_active = False
-                self._last_state = _STATE_WAITING
-                self._last_heartbeat_time = now
-                # Hold tempo so a future lock-in starts with the previous
-                # tempo as its initial guess.
-                return 0.0, False, self.last_tempo_bpm
-
-            # Extrapolate: new_beat = last_beat + tempo * delta_time
-            # tempo in beats/sec = BPM / 60
-            delta_beat = (self.last_tempo_bpm / 60.0) * delta_time
-            inertia_beat = self.last_confident_beat + delta_beat
-
-            self.inertia_active = True
-
+        # Before lock-in, hold position at beat 0 so slides do not fire
+        # before any music is detected.
+        if not self._has_ever_matched:
             self._log_state(
-                _STATE_INERTIA, now, confidence,
-                f"inertia beat={inertia_beat:.1f}, δt={delta_time:.2f}s, "
-                f"tempo={self.last_tempo_bpm:.1f} BPM",
+                _STATE_WAITING, now, confidence,
+                "holding beat 0 until tracking locks in",
             )
-            return inertia_beat, True, self.last_tempo_bpm
+            return 0.0, False, self.last_tempo_bpm
+
+        # After lock-in: hold the last confident beat unchanged.  We trust
+        # pymatchmaker's DTW to resume on its own when audio quality
+        # returns; we do NOT synthesize beats from a stale tempo.
+        self._log_state(
+            _STATE_HOLD, now, confidence,
+            f"holding beat={self.last_confident_beat:.1f} "
+            f"(δt={now - self.last_confident_time:.2f}s since last confident match)",
+        )
+        return self.last_confident_beat, False, self.last_tempo_bpm
 
     def _log_state(
         self, state: str, now: float, confidence: float, detail: str

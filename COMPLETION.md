@@ -44,7 +44,7 @@ pymatchmaker ✗ (モック: 120BPM自動進行)
   │   ├── feature_extractor.py       (Chroma抽出)
   │   ├── matcher.py                 (DTWマッチング - モック対応)
   │   ├── state_manager.py           (スレッドセーフ状態)
-  │   ├── inertia_engine.py          (信頼度低下補外)
+  │   ├── inertia_engine.py          (追従ロックインゲート、低信頼度時は直前拍を保持)
   │   ├── cooldown_timer.py          (トリガー冷却)
   │   └── __init__.py
   ├── ui/
@@ -154,7 +154,7 @@ feature_queue
     ↓
 MatchMaker.update() (DTW matching)
     ↓
-InertiaEngine (confidence-based extrapolation)
+InertiaEngine (tracking lock-in gate, holds last confident beat — no extrapolation)
     ↓
 ScoreMapper (beat→measure conversion)
     ↓

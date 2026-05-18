@@ -261,6 +261,42 @@ class ConfigLoader:
         """
         return self.settings.get('inertia_timeout_seconds', 5.0)
 
+    def get_matcher_kwargs(self) -> dict:
+        """Return extra kwargs forwarded to pymatchmaker's Matchmaker.
+
+        Used to tune the OLTW algorithm (see matcher.MatchMaker.__init__
+        for the keys and rationale).  Default narrows ``start_window_size``
+        and ``step_size`` from the upstream defaults — both are needed to
+        prevent the matcher from racing through the first few seconds of
+        the score whenever a repeating motif (e.g. Beethoven 5 opening)
+        makes early matches ambiguous.
+        """
+        # Defaults tuned against pymatchmaker 0.2.1's OnlineTimeWarpingArzt.
+        # These attributes are patched onto score_follower AFTER Matchmaker
+        # constructs it (matcher.py).  The algorithm stores values in
+        # already-multiplied-by-frame_rate form:
+        #   - window_size: in FRAMES (default 150 = 5 s @ 30 fps; too wide,
+        #     allows motif-repeats to dominate)
+        #   - step_size: in REF-FRAMES per input frame (default 5; way more
+        #     than enough to drift forward through fast passages)
+        #   - start_window_size: in FRAMES, set by __init__ from
+        #     ``round(seconds * frame_rate)``; we override the frame count
+        #     directly post-construction
+        default_kwargs = {
+            "window_size": 30,        # ~1 s @ 30 fps
+            "step_size": 1,           # advance at most 1 ref-frame per input
+            "start_window_size": 8,   # ~0.27 s — keep startup tight
+        }
+        user_kwargs = self.settings.get("matcher_kwargs", {})
+        if not isinstance(user_kwargs, dict):
+            logger.warning(
+                "settings.matcher_kwargs must be a dict; got %r — ignoring",
+                user_kwargs,
+            )
+            user_kwargs = {}
+        merged = {**default_kwargs, **user_kwargs}
+        return merged
+
     def get_mic_device(self):
         """Return the audio input device hint (None / int / str).
 

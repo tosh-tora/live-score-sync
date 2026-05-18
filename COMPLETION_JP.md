@@ -55,7 +55,7 @@ pymatchmaker ✗ (モック: 120BPM自動進行)
   │   ├── feature_extractor.py       (Chroma特徴抽出)
   │   ├── matcher.py                 (DTWマッチング - モック対応)
   │   ├── state_manager.py           (スレッドセーフ状態)
-  │   ├── inertia_engine.py          (信頼度低下補外)
+  │   ├── inertia_engine.py          (追従ロックインゲート、低信頼度時は直前拍を保持)
   │   ├── cooldown_timer.py          (トリガー冷却)
   │   └── __init__.py
   ├── ui/
@@ -70,7 +70,7 @@ pymatchmaker ✗ (モック: 120BPM自動進行)
 **機能:**
 - リアルタイム音声追従
 - 変拍子対応のbeat↔小節変換
-- 信頼度ベース自動補外（慣性モード）
+- 信頼度ベース追従ホールド（低信頼度時は直前拍を保持、外挿はしない）
 - 3秒クールダウン（誤発火防止）
 - Tkinter リアルタイムGUI
 - スレッドセーフ設計

@@ -7,7 +7,7 @@
 - **リアルタイム音声解析**: マイク入力を取得してChroma特徴を抽出
 - **DTW基づくアライメント**: PyMatcherで演奏と楽譜を照合
 - **小節精度トリガー**: 指定小節で自動的にキーボードコマンド送信
-- **堅牢な自動補外**: 信頼度低下時はテンポ補外でスムーズな再生継続（慣性モード）
+- **追従ロックインゲート**: 信頼度低下時は直前の確信できた拍位置を保持（テンポ外挿はしない — pymatchmaker の DTW 自身の復帰を待つ）
 - **シーケンシャル楽章読み込み**: 'N'キーで次の楽章を順次読み込み
 - **ライブ表示GUI**: 現在小節、信頼度、次トリガーを大画面表示
 
@@ -35,7 +35,7 @@
 | `feature_extractor.py` | Chroma特徴抽出 (librosa) |
 | `matcher.py` | PyMatcher DTW統合 |
 | `state_manager.py` | スレッドセーフ中央状態管理 |
-| `inertia_engine.py` | 信頼度ベースのbeat補外 |
+| `inertia_engine.py` | 追従ロックインゲート（低信頼度時は直前拍を保持・外挿はしない） |
 | `cooldown_timer.py` | トリガー連発防止（3秒クールダウン） |
 | `gui_tkinter.py` | Tkinter リアルタイムGUI |
 | `config/loader.py` | JSON設定ファイル解析 |
@@ -131,7 +131,7 @@ GUI に表示される内容:
 - **大型小節表示**: 現在の小節（1からのカウント）
 - **信頼度バー**: DTW アライメント品質（緑=高、赤=低）
 - **次トリガー**: 次のトリガー小節
-- **[慣性モード]**: 信頼度が閾値以下の場合表示
+- **[慣性モード]**: 互換のため残存（現バージョンでは常に非表示）
 - **クールダウン表示**: トリガー猶予期間中に表示
 
 ## 動作原理
@@ -141,9 +141,9 @@ GUI に表示される内容:
 1. **音声キャプチャ**: AudioCapturer がマイクを読み込み → audio_queue
 2. **特徴抽出**: FeatureExtractor がフレームをバッファリング、librosa で Chroma 12次元ベクトル抽出 → feature_queue
 3. **マッチング**: MatchingEngine が PyMatcher DTW でChroma を楽譜と照合 → (beat, confidence)
-4. **慣性フォールバック**: confidence < 閾値の場合、最後に既知のテンポで beat を補外
+4. **追従ホールド**: confidence < 閾値の場合、直前の確信できた beat をそのまま保持（外挿はしない）
 5. **小節変換**: ScoreMapper が beat を小節番号に変換（累積beat↔小節マップ使用）
-6. **状態更新**: AppState が (beat, measure, confidence, inertia_mode) を更新
+6. **状態更新**: AppState が (beat, measure, confidence) を更新
 7. **GUI 表示**: GUI が 100ms ごとにポーリング、表示を更新
 8. **トリガー判定**: TriggerExecutor が現在小節にトリガーがあるか確認、クールダウン確認
 9. **アクション実行**: PyAutoGUI がキーボードコマンド送信（例: 'right'）
@@ -161,13 +161,14 @@ GUI に表示される内容:
 
 二分探索により beat→小節 変換が O(log n) で実行。
 
-### 慣性モード
+### 追従ロックインゲート
 
 confidence が閾値以下（デフォルト 0.4）に低下した場合:
-- 最後の高信頼度 beat を記録
-- 現在のテンポを beat jump レートから推定
-- 再生を進める: `新beat = 最後beat + (tempo_bpm / 60) × 時間経過秒数`
-- 沈黙やノイズの多い区間でも滑らかな再生を維持
+- ロックイン前は beat=0 を返し、トリガー発火を抑止する
+- ロックイン後は **直前の確信できた beat を保持** し続ける
+- テンポによる外挿は行わない（pymatchmaker の DTW が音声品質回復で自分で復帰する設計）
+
+旧バージョンでは「直前テンポで beat を外挿」していたが、ライブ演奏の表現的揺らぎで confidence が頻繁に落ち、外挿が指揮者より先走る → タイムアウトで measure=1 にリセット、という症状を起こすため撤去した。
 
 ## トラブルシューティング
 
@@ -179,7 +180,7 @@ confidence が閾値以下（デフォルト 0.4）に低下した場合:
 
 ### マッチングの問題
 
-- **常時「慣性モード」**: 音質が悪いか楽譜とズレ → 静かな環境で再度試行、楽譜確認
+- **拍が常に直前値で止まったまま**: confidence が常に閾値以下 → 音質が悪いか楽譜とズレ。静かな環境で再度試行、楽譜確認、`confidence_threshold` を下げる
 - **小節間でジャンプ**: beat リセット可能性 → 楽譜内の大きいテンポ変更を確認
 - **トリガーが実行されない**: config.json の小節番号を確認、PowerPoint がアクティブか確認
 
@@ -215,9 +216,9 @@ from sequential_live_follower.core.inertia_engine import InertiaEngine
 mapper = ScoreMapper("guide_mv1.xml")
 measure = mapper.beat_to_measure(45.5)
 
-# 慣性で beat を推定
-inertia = InertiaEngine(confidence_threshold=0.4)
-beat, is_inertia, tempo = inertia.update(current_beat=45.0, confidence=0.3)
+# 信頼度ゲート経由で beat を取得（外挿はしない — 低信頼度時は直前値を保持）
+gate = InertiaEngine(confidence_threshold=0.4)
+beat, _inertia_unused, tempo = gate.update(current_beat=45.0, confidence=0.3)
 ```
 
 ## 依存パッケージ

@@ -63,3 +63,43 @@
 | エンドツーエンド起動 | ✅ OK |
 
 **WSL2 オーディオ追加セットアップ**: `libasound2-plugins` + `~/.asoundrc` (ALSA default → pulse) が必要だった。`INSTALLATION_JP.md` に追記要。
+
+---
+
+## Issue #28 / #29 後の残課題: 2x 先走り問題の診断 (2026-05-17)
+
+修正済の慣性外挿撤去 (#28) と拍子記号 ndarray 解釈 (#29) を WSL2 で適用後、運命冒頭 (2/4) の GUI カウントが演奏より約 2 倍速で進む報告。pymatchmaker のソース確認では理論上 2x になる単位ミスマッチはなく、観測データなしには根本原因が特定できない。
+
+### 環境変数フラグ
+
+| 変数 | 効果 |
+|---|---|
+| `SLF_BEAT_LOG=path.csv` | pymatchmaker が emit する毎ビートを CSV (wall_iso, monotonic_s, raw_beat, score_file) で記録 |
+| `SLF_VERBOSE_SYNC=1` | `-v` 時の state-sync DEBUG ログのレート制限 (1Hz) を外し、20Hz で出力 |
+
+### 検証プロトコル A: メトロノーム較正 (必須)
+
+1. iPhone 等で 60 BPM のメトロノーム音を 30 秒間マイクに入力する
+   ```bash
+   SLF_BEAT_LOG=metro_60bpm.csv python -m sequential_live_follower.main config.json --slide-url <URL> -v
+   ```
+2. 終了後、CSV から `(raw_beat[t≈30s] - raw_beat[t≈10s]) / 20` を計算 (= 平均 beats/sec)
+3. 期待値:
+   - **60 BPM (4分音符) ≒ 1.0 beats/sec** が期待値 (pymatchmaker は quarter-note 単位)
+   - 観測 1.0 ± 0.1 → pymatchmaker は正しく単位を返している → DTW アラインメント側の問題
+   - 観測 2.0 ± 0.2 → pymatchmaker が 2x の単位で返している → 我々の wrapper / score_mapper 側で /2 する必要
+   - 観測がばらつく / 線形でない → DTW 自体の安定性問題
+4. CSV のパスと主要数値を共有してもらい、次の手 (DTW パラメータ調整 or 単位補正) を決める
+
+### 検証プロトコル B: 既知録音再生 (任意)
+
+別マシンで運命冒頭の演奏録音 (BPM が分かるもの) をスピーカー再生 → マイク収録。CSV をプロットして raw_beat 時系列が線形 (= 安定追従) か、階段状ジャンプ (= DTW misalignment) かを目視判別。
+
+### 観測後の追加修正 (要観測値)
+
+| 観測パターン | 想定原因 | 対策候補 |
+|---|---|---|
+| 2x ぴったり | pymatchmaker 単位の誤解釈 | `Matchmaker(..., tempo=N)` 明示、または score_mapper 側で /2 |
+| 概ね線形だが時々ジャンプ | DTW misalignment | `method="dixon"`、`feature_type="mel"`/`"logspectral"` 試行 |
+| 線形 1x | 単に古いブランチ / 設定 | ユーザー再確認 |
+

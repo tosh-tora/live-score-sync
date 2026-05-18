@@ -7,7 +7,7 @@ Real-time orchestral performance tracker that monitors live audio, aligns it wit
 - **Real-Time Audio Analysis**: Captures microphone input and extracts Chroma features
 - **DTW-Based Alignment**: Uses PyMatcher to align live performance with score
 - **Measure-Accurate Triggers**: Automatically sends keyboard commands at configured measures
-- **Robust Fallback**: Maintains playback continuity using tempo extrapolation when confidence is low (inertia mode)
+- **Tracking Lock-In Gate**: When confidence is low, the displayed beat is held at the last confident position (no tempo extrapolation — we wait for pymatchmaker's DTW to recover on its own)
 - **Sequential Movement Loading**: Press 'N' key to load next movement from config
 - **Live Display GUI**: Shows current measure, confidence, and next trigger in large, visible format
 
@@ -35,7 +35,7 @@ Main Thread (tkinter GUI)
 | `feature_extractor.py` | Chroma feature extraction using librosa |
 | `matcher.py` | PyMatcher DTW integration for beat tracking |
 | `state_manager.py` | Thread-safe central state store |
-| `inertia_engine.py` | Confidence-based beat extrapolation fallback |
+| `inertia_engine.py` | Tracking lock-in gate (holds last confident beat when confidence is low; no extrapolation) |
 | `cooldown_timer.py` | Trigger rate limiting (prevent misfires) |
 | `gui_tkinter.py` | Tkinter GUI for live display |
 | `config/loader.py` | JSON configuration file parser |
@@ -85,7 +85,7 @@ Create `config.json` (template: `config_example.json`):
 ### Configuration Fields
 
 - **cooldown_seconds** (float): Grace period after trigger fires (prevents rapid re-triggering)
-- **confidence_threshold** (float): Below this, inertia mode activates (tempo extrapolation)
+- **confidence_threshold** (float): Below this, the gate holds the last confident beat (no extrapolation)
 - **xml_file** (str): MusicXML guide score (from `compressor.py`)
 - **triggers** (list): Measure numbers and corresponding keyboard actions
 - **action** (str): Keyboard key ('right', 'left', 'up', 'down', 'space', etc.)
@@ -117,7 +117,7 @@ The GUI shows:
 - **Large Measure**: Current measure (1-indexed)
 - **Confidence Bar**: DTW alignment quality (green = high, red = low)
 - **Next Trigger**: Upcoming measure with trigger
-- **[INERTIA MODE]**: Indicates confidence below threshold (using tempo extrapolation)
+- **[INERTIA MODE]**: Retained for compatibility; always hidden in the current version
 - **Cooldown Indicator**: Shown when trigger is in grace period
 
 ## How It Works
@@ -127,9 +127,9 @@ The GUI shows:
 1. **Audio Capture**: AudioCapturer reads microphone → audio_queue (44.1kHz, float32)
 2. **Feature Extraction**: FeatureExtractor buffers frames, extracts 12-D Chroma via librosa → feature_queue (~86 Hz output)
 3. **Matching**: MatchingEngine runs PyMatcher DTW on each Chroma vector → (beat, confidence)
-4. **Inertia Fallback**: If confidence < threshold, extrapolate beat using last known tempo
+4. **Tracking Hold**: If confidence < threshold, hold the last confident beat unchanged (no extrapolation)
 5. **Measure Conversion**: ScoreMapper converts beat to measure number using beat↔measure map
-6. **State Update**: AppState updated with (beat, measure, confidence, inertia_mode)
+6. **State Update**: AppState updated with (beat, measure, confidence)
 7. **GUI Display**: GUI polls state every 100ms, updates display
 8. **Trigger Check**: TriggerExecutor checks if current measure has trigger, respects cooldown
 9. **Action Execute**: PyAutoGUI sends keyboard command (e.g., 'right')
@@ -147,13 +147,17 @@ Measure 3 (5/8): beats 7.0–9.25
 
 Binary search provides O(log n) beat→measure lookup.
 
-### Inertia Mode
+### Tracking Lock-In Gate
 
 When confidence drops below threshold (default 0.4):
-- Last high-confidence beat is recorded
-- Current tempo estimated from beat jump rate
-- Playback advances using: `new_beat = last_beat + (tempo_bpm / 60) × time_delta`
-- Maintains smooth playback during difficult passages (silence, low SNR, etc.)
+- Before lock-in, return beat=0 so the measure-1 trigger does not fire prematurely
+- After lock-in, **hold the last confident beat** unchanged until the matcher recovers
+
+A previous version extrapolated forward at the last known tempo. In practice
+live performance routinely causes confidence drops (rit/accel, fermatas,
+dynamics), and the extrapolation raced ahead of the conductor, then snapped
+back to measure 1 when its 5-second timeout expired. The current design
+trusts pymatchmaker's DTW to recover on its own when audio quality returns.
 
 ## Troubleshooting
 
@@ -201,9 +205,9 @@ from sequential_live_follower.core.inertia_engine import InertiaEngine
 mapper = ScoreMapper("guide_mv1.xml")
 measure = mapper.beat_to_measure(45.5)
 
-# Estimate beat with inertia
-inertia = InertiaEngine(confidence_threshold=0.4)
-beat, is_inertia, tempo = inertia.update(current_beat=45.0, confidence=0.3)
+# Pass beat through the tracking gate (low-confidence input is held, not extrapolated)
+gate = InertiaEngine(confidence_threshold=0.4)
+beat, _inertia_unused, tempo = gate.update(current_beat=45.0, confidence=0.3)
 ```
 
 ## Dependencies

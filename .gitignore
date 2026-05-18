@@ -11,3 +11,7 @@ build/
 config.json
 work/inbox/
 work/outbox/
+# Diagnostic CSV traces (SLF_BEAT_LOG output)
+*.csv
+# Synthesized score audio for self-match testing
+score_synth*.wav

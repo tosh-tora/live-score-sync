@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
@@ -96,6 +97,23 @@ class SequentialFollower:
         self._state_sync_thread: threading.Thread | None = None
         self._trigger_thread: threading.Thread | None = None
         self._workers_stop = threading.Event()
+
+        # Throttle for the per-iteration diagnostic log in _state_sync_loop.
+        # The loop runs at _STATE_SYNC_HZ (20 Hz); logging every tick floods
+        # the -v output.  We emit a single summary line every ~1 s instead.
+        # If env var SLF_VERBOSE_SYNC=1 is set, the throttle is bypassed and
+        # every iteration is logged — useful for diagnosing ratio/jitter
+        # issues at the full state-sync rate.
+        self._last_state_diag_log = 0.0
+        self._verbose_sync = os.environ.get("SLF_VERBOSE_SYNC", "").strip() == "1"
+        if self._verbose_sync:
+            logger.info("SLF_VERBOSE_SYNC=1 → state-sync DEBUG log un-throttled (20 Hz)")
+
+        # Prior gate state so we can detect silent→active and active→silent
+        # transitions and freeze / unfreeze the matcher accordingly.  Without
+        # this, pymatchmaker silently drifts current_position forward during
+        # silence and the GUI jumps to a later measure when audio resumes.
+        self._prev_gate_active: bool = False
 
         logger.info("SequentialFollower initialization complete")
 
@@ -239,6 +257,7 @@ class SequentialFollower:
                 score_file=xml_file,
                 input_type="audio",
                 device_name_or_index=self.config.get_mic_device(),
+                extra_kwargs=self.config.get_matcher_kwargs(),
             )
             self.matcher.start()
         except Exception as exc:  # noqa: BLE001
@@ -305,6 +324,18 @@ class SequentialFollower:
                 if gate_active:
                     raw_conf = 0.0
 
+                # Freeze / unfreeze the matcher on gate transitions so the
+                # DP doesn't drift forward through silence (see matcher.freeze
+                # for full rationale).  We only freeze after lock-in — before
+                # that there's nothing to preserve and freezing at frame 0
+                # would pin the matcher to the score start.
+                if gate_active != self._prev_gate_active:
+                    if gate_active and self.inertia.is_locked_in():
+                        matcher.freeze()
+                    elif not gate_active:
+                        matcher.unfreeze()
+                    self._prev_gate_active = gate_active
+
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
                 # ScoreMapper returns a 0-indexed offset (downbeat = 0.0);
@@ -315,6 +346,20 @@ class SequentialFollower:
                 self.state.set_confidence(raw_conf)
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
+
+                # Diagnostic line.  Throttled to 1 Hz by default so the -v
+                # output stays readable; set SLF_VERBOSE_SYNC=1 to emit at
+                # the full state-sync rate (20 Hz) for ratio/jitter analysis.
+                now = time.time()
+                if self._verbose_sync or now - self._last_state_diag_log >= 1.0:
+                    logger.debug(
+                        "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
+                        "mic_db=%.1f gate=%s locked=%s",
+                        raw_beat, beat, measure, raw_conf,
+                        mic_level_db, gate_active,
+                        self.inertia.is_locked_in(),
+                    )
+                    self._last_state_diag_log = now
 
             except Exception as exc:  # noqa: BLE001 — keep the thread alive
                 logger.error("State-sync error: %s", exc, exc_info=True)
