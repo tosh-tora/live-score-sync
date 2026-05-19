@@ -243,14 +243,16 @@ class ConfigLoader:
         pymatchmaker's tendency to keep advancing the beat on silence /
         background noise via its score-driven prior.
 
-        Default raised from -55 to **-35 dBFS** after the 2026-05 noise
-        diagnostic logs: ambient WSL2 + RDP-audio noise floor was
-        ~-44 dBFS average, so -55 was 10+ dB below the room floor and
-        the gate effectively never fired.  -35 catches background room
-        noise while still letting normal instrument playback through.
-        Set lower if you find the gate cutting out genuine soft passages.
+        Default lowered to **-42 dBFS** after operator feedback that
+        -35 was missing genuine soft playing (the user's piano passages
+        sit around -34..-40 dBFS in the WSL2 + RDP-audio path).  -42 is
+        a few dB above the room floor (-44 to -50 dBFS in our setup)
+        so the gate still fires for true silence but stays open during
+        real performance.  Non-musical content that survives this
+        gate is filtered by the spectral-flatness check and (once
+        calibrated) the DTW match-cost gate.
         """
-        return self.settings.get('silence_threshold_db', -35.0)
+        return self.settings.get('silence_threshold_db', -42.0)
 
     def get_musical_flatness_threshold(self) -> float:
         """Get spectral-flatness threshold above which audio is non-musical.

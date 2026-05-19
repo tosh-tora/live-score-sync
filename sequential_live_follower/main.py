@@ -437,13 +437,16 @@ class SequentialFollower:
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
 
+                # Fetch the matcher's internal diagnostic snapshot once per
+                # tick — lock-protected and cheap.  Used for both the CSV row
+                # (when --diag-dir is on) and the verbose DEBUG log line.
+                diag = matcher.get_diagnostics()
+
                 # Diagnostic CSV row (always full rate when --diag-dir is on).
                 # Written off-thread by DiagLogger so the 20 Hz state-sync
-                # cadence isn't disturbed.  We fetch the matcher's internal
-                # diagnostic snapshot once per tick — it's lock-protected and
-                # cheap.  Skipped entirely when --diag-dir wasn't passed.
+                # cadence isn't disturbed.  Skipped entirely when --diag-dir
+                # wasn't passed.
                 if self.diag_logger is not None:
-                    diag = matcher.get_diagnostics()
                     self.diag_logger.log({
                         "raw_beat": raw_beat,
                         "beat": beat,
@@ -464,6 +467,7 @@ class SequentialFollower:
                         "history_len": diag.history_len,
                         "win_velocity": diag.win_velocity,
                         "stall_sec": diag.stall_sec,
+                        "match_cost": diag.match_cost,
                     })
 
                 # Diagnostic line.  Throttled to 1 Hz by default so the -v
@@ -473,10 +477,11 @@ class SequentialFollower:
                 if self._verbose_sync or now - self._last_state_diag_log >= 1.0:
                     logger.debug(
                         "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
-                        "mic_db=%.1f flat=%.3f gate=%s(silent=%s,non_musical=%s) locked=%s",
+                        "mic_db=%.1f flat=%.3f cost=%.4f "
+                        "gate=%s(silent=%s,non_musical=%s) locked=%s",
                         raw_beat, beat, measure, raw_conf,
-                        mic_level_db, flatness, gate_active,
-                        silent, non_musical,
+                        mic_level_db, flatness, diag.match_cost,
+                        gate_active, silent, non_musical,
                         self.inertia.is_locked_in(),
                     )
                     self._last_state_diag_log = now

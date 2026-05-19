@@ -71,6 +71,13 @@ FIELDNAMES = [
     "history_len",
     "win_velocity",
     "stall_sec",
+    # pymatchmaker's internal normalized DTW min cost for the most recent
+    # step (captured via instrumentation in matcher.py).  Lower = better
+    # match between input audio and the chosen score position.  This is the
+    # raw signal a future match-quality gate can threshold on — speech and
+    # tonal noise produce significantly higher values than real performance.
+    # NaN when pymatchmaker isn't installed or the patch failed to attach.
+    "match_cost",
 ]
 
 
