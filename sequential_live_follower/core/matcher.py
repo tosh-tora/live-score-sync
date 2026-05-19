@@ -57,6 +57,7 @@ import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Deque, Optional, Tuple, Union
 
@@ -80,6 +81,115 @@ _MIN_VELOCITY_FOR_CONFIDENCE = 0.5
 # spurious matches in irrelevant audio and race through the score; this cap
 # rejects those. 5 beats/sec = 300 BPM — above any realistic orchestral tempo.
 _MAX_VELOCITY_FOR_CONFIDENCE = 5.0
+
+
+# ------------------------------------------------------------------ DTW cost
+# Per-thread storage for the ``min_costs`` value computed inside pymatchmaker's
+# OLTW step.  See ``_install_oltw_instrumentation`` for the rationale: the
+# upstream algorithm computes a normalized "best path cost" each step but
+# discards it after using it to pick the next position, so we wrap the C-level
+# ``oltw_arzt_loop`` function to capture it.  Keyed by thread id so multiple
+# MatchMaker instances (or test code) don't clobber each other.
+_dtw_min_cost_capture: dict = {}
+
+
+def _install_oltw_instrumentation() -> None:
+    """Monkey-patch ``matchmaker.dp.oltw_arzt.oltw_arzt_loop`` to capture
+    the per-step normalized min cost.
+
+    Why we patch
+    ------------
+    pymatchmaker's OnlineTimeWarpingArzt has no public match-quality signal.
+    Its DTW always advances forward (step_size ≥ 1 reference frame per input
+    frame) regardless of how well the audio matches the score.  In live
+    deployment, any tonal sound — including human speech, which has strong
+    harmonics and looks "musical" to the spectral-flatness gate — drives the
+    score counter forward.
+
+    Internally the algorithm DOES compute a useful signal: ``min_costs``, the
+    normalized best-path cost in the current search window.  Well-matched
+    audio yields a small value; mismatched audio (speech, noise) yields a
+    much larger one.  The C-level ``oltw_arzt_loop`` returns ``min_costs``
+    as its 3rd tuple element but the Python ``step()`` discards it after
+    using it to decide the next position.
+
+    We wrap ``oltw_arzt_loop`` once (idempotent) and stash the value in a
+    thread-keyed dict so the matcher's worker can read it back after each
+    yield from ``Matchmaker.run()``.  Wrapping at this layer is the only
+    place the value is accessible without forking pymatchmaker.
+
+    Fragility note
+    --------------
+    This patches a private/internal function of pymatchmaker 0.2.x.  If a
+    future upstream release renames the function or changes its return
+    shape, we silently lose the signal — ``get_diagnostics().match_cost``
+    will stay at NaN and the gate (if enabled) will simply pass everything.
+    """
+    try:
+        import matchmaker.dp.oltw_arzt as _oltw_mod  # type: ignore
+    except ImportError:
+        # pymatchmaker not installed — nothing to do.  This happens in CI
+        # (we keep the import path working there for testing) and on Windows
+        # where only the Linux wheels exist.
+        return
+
+    if getattr(_oltw_mod, "_slf_instrumented", False):
+        return  # already wrapped
+
+    original_loop = _oltw_mod.oltw_arzt_loop
+
+    def _wrapped_loop(*args, **kwargs):
+        result = original_loop(*args, **kwargs)
+        # Expected return: (global_cost_matrix, min_index, min_costs)
+        try:
+            _dtw_min_cost_capture[threading.get_ident()] = float(result[2])
+        except (IndexError, TypeError, ValueError):
+            # Shape unexpected — leave previous value in place (or absent).
+            pass
+        return result
+
+    _oltw_mod.oltw_arzt_loop = _wrapped_loop
+    _oltw_mod._slf_instrumented = True  # type: ignore[attr-defined]
+    logger.info("Installed pymatchmaker OLTW instrumentation (match_cost capture)")
+
+
+# Install at import time.  Cheap (one attribute lookup if pymatchmaker is
+# absent) and avoids the worker thread racing the first step() call.
+_install_oltw_instrumentation()
+
+
+@dataclass(frozen=True)
+class MatcherDiagnostics:
+    """Read-only snapshot of MatchMaker internal state for diagnostic logging.
+
+    Exposed via ``MatchMaker.get_diagnostics()`` so the state-sync loop can
+    correlate confidence drops with the underlying causes (history length,
+    window velocity, stall, freeze) without reaching into private fields.
+    Cheap to construct — read once per state-sync tick (20 Hz).
+    """
+    history_len: int
+    """Number of (timestamp, beat) samples currently in the confidence window."""
+
+    win_velocity: float
+    """Window-wide endpoint velocity (beats/sec). NaN if too few samples."""
+
+    stall_sec: float
+    """Seconds since the last beat update; > _STALL_TIMEOUT_SEC forces conf=0."""
+
+    frozen: bool
+    """True if the silence-gate path has pinned the score follower's position."""
+
+    frozen_frame: Optional[int]
+    """The pinned reference frame when frozen, else None."""
+
+    match_cost: float
+    """Normalized best-path DTW cost from the most recent OLTW step.
+
+    Captured from pymatchmaker's internal ``oltw_arzt_loop`` via a module-level
+    monkey-patch (see ``_install_oltw_instrumentation``).  Lower = better
+    chroma match between input and reference at the chosen position; high
+    values indicate the audio doesn't match the score (speech, noise, wrong
+    piece).  NaN if pymatchmaker is not installed or the patch failed."""
 
 
 class MatchMaker:
@@ -152,6 +262,12 @@ class MatchMaker:
         # DTW restarts from the same place when audio returns.
         self._frozen_frame: Optional[int] = None
         self._beat_history: Deque[Tuple[float, float]] = deque()  # (timestamp, beat)
+
+        # Latest normalized DTW match cost from the OLTW step (lower = better
+        # match).  NaN until pymatchmaker has run at least one step or if the
+        # OLTW instrumentation patch isn't active (e.g. CI without
+        # pymatchmaker installed).  Updated each yield in ``_run_loop``.
+        self._latest_match_cost: float = float("nan")
 
         # Lifecycle
         self._thread: Optional[threading.Thread] = None
@@ -299,6 +415,45 @@ class MatchMaker:
                 confidence = self._latest_confidence
             return self._latest_beat, confidence
 
+    def get_diagnostics(self) -> MatcherDiagnostics:
+        """Snapshot internal state for the diagnostic CSV log.
+
+        Returns the same fields that ``_estimate_confidence_locked`` reasons
+        over, plus the freeze state, so a single CSV row can answer
+        "why was confidence 0/1 at this moment?" after the fact.
+
+        Cheap and lock-protected — safe to call at the state-sync rate.
+        Returns NaN for ``win_velocity`` when fewer than 2 samples are
+        in the history (no velocity defined yet).
+        """
+        with self._lock:
+            history = self._beat_history
+            history_len = len(history)
+            stall_sec = time.time() - self._latest_update_time
+
+            if history_len >= 2:
+                oldest_time, oldest_beat = history[0]
+                newest_time, newest_beat = history[-1]
+                elapsed = newest_time - oldest_time
+                win_velocity = (
+                    (newest_beat - oldest_beat) / elapsed
+                    if elapsed > 0 else float("nan")
+                )
+            else:
+                win_velocity = float("nan")
+
+            frozen_frame = self._frozen_frame
+            match_cost = self._latest_match_cost
+
+        return MatcherDiagnostics(
+            history_len=history_len,
+            win_velocity=win_velocity,
+            stall_sec=stall_sec,
+            frozen=frozen_frame is not None,
+            frozen_frame=frozen_frame,
+            match_cost=match_cost,
+        )
+
     def reset(self) -> None:
         """Reset cached state (used between movements before re-start())."""
         with self._lock:
@@ -306,6 +461,7 @@ class MatchMaker:
             self._latest_confidence = 0.0
             self._latest_update_time = time.time()
             self._beat_history.clear()
+            self._latest_match_cost = float("nan")
         self._ready_event.clear()
 
     # ----------------------------------------------------------------- private
@@ -366,10 +522,19 @@ class MatchMaker:
         logger.info("Entering Matchmaker.run() generator loop")
 
         try:
+            tid = threading.get_ident()
             for current_position in self._mm.run():
                 if self._stop_event.is_set():
                     logger.info("Stop event received, leaving run() loop")
                     break
+
+                # Pull the OLTW step's normalized min cost out of the
+                # per-thread capture dict populated by the instrumentation
+                # patch.  Stored as a plain attribute (no lock needed on the
+                # write — Python float assignment is atomic under the GIL;
+                # the read path in get_diagnostics() takes the lock anyway).
+                match_cost = _dtw_min_cost_capture.get(tid, float("nan"))
+                self._latest_match_cost = match_cost
 
                 # While frozen (silence gate), snap score_follower back to
                 # the pinned frame so DTW cannot drift forward through silence.

@@ -2,7 +2,8 @@
   "settings": {
     "cooldown_seconds": 3.0,
     "confidence_threshold": 0.4,
-    "silence_threshold_db": -55.0,
+    "silence_threshold_db": -42.0,
+    "musical_flatness_threshold": 0.25,
     "inertia_timeout_seconds": 5.0,
     "mic_device": "pulse",
     "_comment_matcher_kwargs": "Optional. Overrides for pymatchmaker's OLTW Arzt internals. Defaults (window_size=30, step_size=1, start_window_size=8) are tuned for scores with repeating motifs (e.g. Beethoven 5). Larger values allow faster tempo deviations but risk runaway alignment. Omit this field to use the defaults.",

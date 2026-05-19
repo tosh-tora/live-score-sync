@@ -35,7 +35,9 @@ from pathlib import Path
 
 from sequential_live_follower.config.loader import ConfigError, ConfigLoader
 from sequential_live_follower.core.audio_level import AudioLevelMonitor
+from sequential_live_follower.core.audio_recorder import AudioRecorder
 from sequential_live_follower.core.cooldown_timer import CooldownTimer
+from sequential_live_follower.core.diag_logger import DiagLogger
 from sequential_live_follower.core.inertia_engine import InertiaEngine
 from sequential_live_follower.core.matcher import MatchMaker
 from sequential_live_follower.core.score_mapper import ScoreMapper
@@ -55,7 +57,14 @@ _TRIGGER_POLL_HZ = 20
 class SequentialFollower:
     """Top-level application orchestrator."""
 
-    def __init__(self, config_path: str, slide_url: str) -> None:
+    def __init__(
+        self,
+        config_path: str,
+        slide_url: str,
+        diag_dir: "Path | None" = None,
+        silence_threshold_db_override: "float | None" = None,
+        musical_flatness_threshold_override: "float | None" = None,
+    ) -> None:
         logger.info("Initializing SequentialFollower (config=%s)", config_path)
 
         self.config = ConfigLoader(config_path)
@@ -72,10 +81,60 @@ class SequentialFollower:
         # confidence to 0 so pymatchmaker's score-driven advance cannot
         # falsely lock in the InertiaEngine.  Must consume the same input
         # device as MatchMaker (see ConfigLoader.get_mic_device).
+        #
+        # CLI ``--silence-threshold-db`` overrides config.json so the
+        # operator can tighten the gate on-site without editing the file
+        # (which is awkward during rehearsal).  Logged so the running
+        # value is visible in -v output.
+        silence_threshold_db = (
+            silence_threshold_db_override
+            if silence_threshold_db_override is not None
+            else self.config.get_silence_threshold_db()
+        )
+        if silence_threshold_db_override is not None:
+            logger.info(
+                "silence_threshold_db = %.1f dBFS (CLI override; config value was %.1f)",
+                silence_threshold_db, self.config.get_silence_threshold_db(),
+            )
+
+        # Spectral-flatness threshold: blocks above this are non-musical
+        # (e.g. coughs, taps, speech) and trigger the same freeze path
+        # the silence gate uses.  CLI override layered the same way for
+        # field tuning during rehearsals.
+        flatness_threshold = (
+            musical_flatness_threshold_override
+            if musical_flatness_threshold_override is not None
+            else self.config.get_musical_flatness_threshold()
+        )
+        if musical_flatness_threshold_override is not None:
+            logger.info(
+                "musical_flatness_threshold = %.2f (CLI override; config value was %.2f)",
+                flatness_threshold, self.config.get_musical_flatness_threshold(),
+            )
+
         self.audio_monitor = AudioLevelMonitor(
-            threshold_db=self.config.get_silence_threshold_db(),
+            threshold_db=silence_threshold_db,
+            flatness_threshold=flatness_threshold,
             device=self.config.get_mic_device(),
         )
+
+        # Diagnostic recorders (only enabled when --diag-dir was passed).
+        # Both are tee'd off existing streams — no extra audio device is
+        # opened — so leaving --diag-dir off has zero runtime cost.
+        self.diag_dir = diag_dir
+        self.diag_logger: DiagLogger | None = None
+        self.audio_recorder: AudioRecorder | None = None
+        if diag_dir is not None:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.diag_logger = DiagLogger(diag_dir / f"diag_{stamp}.csv")
+            self.audio_recorder = AudioRecorder(
+                diag_dir / f"audio_{stamp}.wav",
+                sample_rate=self.audio_monitor.sample_rate,
+            )
+            # Tee mic blocks into the WAV recorder.  Registered before
+            # ``audio_monitor.start()`` so we don't miss the very first
+            # block on machines where the callback fires immediately.
+            self.audio_monitor.add_block_listener(self.audio_recorder.on_block)
 
         # Per-movement objects (recreated each load)
         self.score_mapper: ScoreMapper | None = None
@@ -108,12 +167,6 @@ class SequentialFollower:
         self._verbose_sync = os.environ.get("SLF_VERBOSE_SYNC", "").strip() == "1"
         if self._verbose_sync:
             logger.info("SLF_VERBOSE_SYNC=1 → state-sync DEBUG log un-throttled (20 Hz)")
-
-        # Prior gate state so we can detect silent→active and active→silent
-        # transitions and freeze / unfreeze the matcher accordingly.  Without
-        # this, pymatchmaker silently drifts current_position forward during
-        # silence and the GUI jumps to a later measure when audio resumes.
-        self._prev_gate_active: bool = False
 
         logger.info("SequentialFollower initialization complete")
 
@@ -186,6 +239,17 @@ class SequentialFollower:
 
         self.audio_monitor.stop()
         self.slide_controller.stop()
+
+        # Close diagnostic artifacts after the audio + matcher threads
+        # have stopped pushing data so the final CSV rows and WAV blocks
+        # are captured in full.
+        if self.audio_recorder is not None:
+            self.audio_recorder.close()
+            self.audio_recorder = None
+        if self.diag_logger is not None:
+            self.diag_logger.close()
+            self.diag_logger = None
+
         logger.info("Shutdown complete")
 
     # ---------------------------------------------------- movement loading
@@ -312,29 +376,55 @@ class SequentialFollower:
 
                 raw_beat, raw_conf = matcher.get_latest()
 
-                # Silence gate: pymatchmaker keeps advancing the beat from
-                # its score-prior even when the mic is dead silent.  Force
-                # confidence to 0 in that case so the InertiaEngine cannot
-                # falsely lock in tracking.  When AudioLevelMonitor failed
-                # to open its stream, is_active() falls through to True so
-                # we don't unfairly gate the matcher's own confidence.
+                # Combined musical-content gate: pymatchmaker keeps
+                # advancing the beat from its score-prior on noise just
+                # as readily as on silence (the DTW finds *some* chroma
+                # match for any sustained sound).  We block both cases:
+                #
+                #   silent       : mic_db below the silence threshold
+                #   non_musical  : spectral flatness above the threshold
+                #                  (broadband noise — coughs, taps, paper,
+                #                   speech — rather than tonal content)
+                #
+                # Either condition forces raw_conf to 0 so the
+                # InertiaEngine cannot lock in, and triggers a freeze on
+                # the matcher's DTW position (below) so it cannot drift
+                # forward through the bad audio.  When AudioLevelMonitor
+                # failed to open its stream, both is_active() and
+                # is_musical() fall through to True so we don't unfairly
+                # gate the matcher.
                 mic_available = self.audio_monitor.is_available()
                 mic_level_db = self.audio_monitor.get_level_db()
-                gate_active = mic_available and not self.audio_monitor.is_active()
+                flatness = self.audio_monitor.get_spectral_flatness()
+                silent = not self.audio_monitor.is_active()
+                non_musical = not self.audio_monitor.is_musical()
+                gate_active = mic_available and (silent or non_musical)
                 if gate_active:
                     raw_conf = 0.0
 
-                # Freeze / unfreeze the matcher on gate transitions so the
-                # DP doesn't drift forward through silence (see matcher.freeze
-                # for full rationale).  We only freeze after lock-in — before
-                # that there's nothing to preserve and freezing at frame 0
-                # would pin the matcher to the score start.
-                if gate_active != self._prev_gate_active:
-                    if gate_active and self.inertia.is_locked_in():
-                        matcher.freeze()
-                    elif not gate_active:
-                        matcher.unfreeze()
-                    self._prev_gate_active = gate_active
+                # Drive the matcher's freeze/unfreeze state from the *current*
+                # gate signal every tick, not just on transitions.
+                #
+                # Transition-based freezing missed a critical case: when the
+                # operator presses 'R' to reload the movement, a fresh matcher
+                # is constructed but ``_prev_gate_active`` retains its old
+                # value from before the reload.  If the room is silent at the
+                # moment of the reload (the typical case — the operator only
+                # presses R when tracking has gone wrong, which usually
+                # coincides with quiet moments), gate_active stays True
+                # continuously across the reload, no transition is detected,
+                # and freeze() is never called on the new matcher.  Diagnostic
+                # data (diag4) showed the new matcher's DTW racing forward
+                # 11.5 beats over 9 silent seconds, then jumping the displayed
+                # measure from 1 to 6 the moment the gate first opened.
+                #
+                # ``freeze()`` and ``unfreeze()`` are both idempotent
+                # (matcher.py:283–310) and only log on actual state change, so
+                # calling them every tick is cheap.
+                if gate_active:
+                    matcher.freeze()
+                else:
+                    matcher.unfreeze()
 
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
@@ -347,6 +437,39 @@ class SequentialFollower:
                 self.state.set_inertia_mode(inertia_active, tempo)
                 self.state.set_mic_level(mic_level_db, gate_active, mic_available)
 
+                # Fetch the matcher's internal diagnostic snapshot once per
+                # tick — lock-protected and cheap.  Used for both the CSV row
+                # (when --diag-dir is on) and the verbose DEBUG log line.
+                diag = matcher.get_diagnostics()
+
+                # Diagnostic CSV row (always full rate when --diag-dir is on).
+                # Written off-thread by DiagLogger so the 20 Hz state-sync
+                # cadence isn't disturbed.  Skipped entirely when --diag-dir
+                # wasn't passed.
+                if self.diag_logger is not None:
+                    self.diag_logger.log({
+                        "raw_beat": raw_beat,
+                        "beat": beat,
+                        "measure": measure,
+                        "beat_in_measure": beat_in_measure,
+                        "raw_conf": raw_conf,
+                        "mic_db": mic_level_db,
+                        "spectral_flatness": flatness,
+                        "is_musical": not non_musical,
+                        "silence_gate_fired": silent,
+                        "gate_active": gate_active,
+                        "mic_available": mic_available,
+                        "matcher_frozen": diag.frozen,
+                        "matcher_frozen_frame": diag.frozen_frame,
+                        "locked_in": self.inertia.is_locked_in(),
+                        "inertia_active": inertia_active,
+                        "inertia_tempo_bpm": tempo,
+                        "history_len": diag.history_len,
+                        "win_velocity": diag.win_velocity,
+                        "stall_sec": diag.stall_sec,
+                        "match_cost": diag.match_cost,
+                    })
+
                 # Diagnostic line.  Throttled to 1 Hz by default so the -v
                 # output stays readable; set SLF_VERBOSE_SYNC=1 to emit at
                 # the full state-sync rate (20 Hz) for ratio/jitter analysis.
@@ -354,9 +477,11 @@ class SequentialFollower:
                 if self._verbose_sync or now - self._last_state_diag_log >= 1.0:
                     logger.debug(
                         "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
-                        "mic_db=%.1f gate=%s locked=%s",
+                        "mic_db=%.1f flat=%.3f cost=%.4f "
+                        "gate=%s(silent=%s,non_musical=%s) locked=%s",
                         raw_beat, beat, measure, raw_conf,
-                        mic_level_db, gate_active,
+                        mic_level_db, flatness, diag.match_cost,
+                        gate_active, silent, non_musical,
                         self.inertia.is_locked_in(),
                     )
                     self._last_state_diag_log = now
@@ -512,6 +637,37 @@ def main() -> int:
         action="store_true",
         help="Enable DEBUG-level logging",
     )
+    parser.add_argument(
+        "--diag-dir",
+        type=Path,
+        default=None,
+        help=(
+            "診断ログ (CSV) と raw マイク音声 (WAV) の出力ディレクトリ。"
+            "指定しなければ何も出力しない。「ただの雑音で進行する」など、"
+            "現場でしか再現しない問題の原因切り分け用。"
+        ),
+    )
+    parser.add_argument(
+        "--silence-threshold-db",
+        type=float,
+        default=None,
+        help=(
+            "config.json の silence_threshold_db を上書きする (dBFS)。"
+            "現場で雑音通過の閾値を即座に詰めるための調整スイッチ。"
+            "例: --silence-threshold-db -40 で -40 dBFS 以下を無音扱い"
+        ),
+    )
+    parser.add_argument(
+        "--musical-flatness-threshold",
+        type=float,
+        default=None,
+        help=(
+            "config.json の musical_flatness_threshold を上書きする (0-1)。"
+            "spectral flatness がこの値以上のブロックを「楽音でない」と"
+            "判定して matcher を止める。例: --musical-flatness-threshold 0.30"
+            " で楽音判定を緩く、--musical-flatness-threshold 0.20 で厳しく"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -531,8 +687,26 @@ def main() -> int:
         logger.error("Config file not found: %s", config_path)
         return 1
 
+    # Validate / prepare the diagnostic output directory up front so the
+    # operator gets a clear error before any audio threads are spawned.
+    diag_dir: Path | None = None
+    if args.diag_dir is not None:
+        diag_dir = args.diag_dir.expanduser().resolve()
+        try:
+            diag_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error("--diag-dir を作成できません: %s (%s)", diag_dir, exc)
+            return 1
+        logger.info("Diagnostic capture enabled → %s", diag_dir)
+
     try:
-        app = SequentialFollower(str(config_path), slide_url=args.slide_url)
+        app = SequentialFollower(
+            str(config_path),
+            slide_url=args.slide_url,
+            diag_dir=diag_dir,
+            silence_threshold_db_override=args.silence_threshold_db,
+            musical_flatness_threshold_override=args.musical_flatness_threshold,
+        )
         app.run()
         return 0
     except ConfigError as exc:
