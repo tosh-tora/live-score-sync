@@ -168,12 +168,6 @@ class SequentialFollower:
         if self._verbose_sync:
             logger.info("SLF_VERBOSE_SYNC=1 → state-sync DEBUG log un-throttled (20 Hz)")
 
-        # Prior gate state so we can detect silent→active and active→silent
-        # transitions and freeze / unfreeze the matcher accordingly.  Without
-        # this, pymatchmaker silently drifts current_position forward during
-        # silence and the GUI jumps to a later measure when audio resumes.
-        self._prev_gate_active: bool = False
-
         logger.info("SequentialFollower initialization complete")
 
     # ----------------------------------------------------- lifecycle
@@ -408,23 +402,29 @@ class SequentialFollower:
                 if gate_active:
                     raw_conf = 0.0
 
-                # Freeze / unfreeze the matcher on gate transitions so the
-                # DTW cannot drift forward through silence or noise.
+                # Drive the matcher's freeze/unfreeze state from the *current*
+                # gate signal every tick, not just on transitions.
                 #
-                # We freeze unconditionally (not just after lock-in) because
-                # diagnostic data showed raw_beat advancing from 0 to 11+ during
-                # the pre-lock-in silent period; when the gate then opened for
-                # even 1–2 frames the InertiaEngine adopted the stale raw_beat
-                # and the displayed measure jumped from 1 to 6. Freezing from
-                # the very first gate-active tick pins the DTW at frame 0 (or
-                # the last good position) so the first gate-open always starts
-                # tracking from a sane position.
-                if gate_active != self._prev_gate_active:
-                    if gate_active:
-                        matcher.freeze()
-                    else:
-                        matcher.unfreeze()
-                    self._prev_gate_active = gate_active
+                # Transition-based freezing missed a critical case: when the
+                # operator presses 'R' to reload the movement, a fresh matcher
+                # is constructed but ``_prev_gate_active`` retains its old
+                # value from before the reload.  If the room is silent at the
+                # moment of the reload (the typical case — the operator only
+                # presses R when tracking has gone wrong, which usually
+                # coincides with quiet moments), gate_active stays True
+                # continuously across the reload, no transition is detected,
+                # and freeze() is never called on the new matcher.  Diagnostic
+                # data (diag4) showed the new matcher's DTW racing forward
+                # 11.5 beats over 9 silent seconds, then jumping the displayed
+                # measure from 1 to 6 the moment the gate first opened.
+                #
+                # ``freeze()`` and ``unfreeze()`` are both idempotent
+                # (matcher.py:283–310) and only log on actual state change, so
+                # calling them every tick is cheap.
+                if gate_active:
+                    matcher.freeze()
+                else:
+                    matcher.unfreeze()
 
                 beat, inertia_active, tempo = self.inertia.update(raw_beat, raw_conf)
                 measure = mapper.beat_to_measure(beat)
