@@ -409,14 +409,20 @@ class SequentialFollower:
                     raw_conf = 0.0
 
                 # Freeze / unfreeze the matcher on gate transitions so the
-                # DP doesn't drift forward through silence (see matcher.freeze
-                # for full rationale).  We only freeze after lock-in — before
-                # that there's nothing to preserve and freezing at frame 0
-                # would pin the matcher to the score start.
+                # DTW cannot drift forward through silence or noise.
+                #
+                # We freeze unconditionally (not just after lock-in) because
+                # diagnostic data showed raw_beat advancing from 0 to 11+ during
+                # the pre-lock-in silent period; when the gate then opened for
+                # even 1–2 frames the InertiaEngine adopted the stale raw_beat
+                # and the displayed measure jumped from 1 to 6. Freezing from
+                # the very first gate-active tick pins the DTW at frame 0 (or
+                # the last good position) so the first gate-open always starts
+                # tracking from a sane position.
                 if gate_active != self._prev_gate_active:
-                    if gate_active and self.inertia.is_locked_in():
+                    if gate_active:
                         matcher.freeze()
-                    elif not gate_active:
+                    else:
                         matcher.unfreeze()
                     self._prev_gate_active = gate_active
 
