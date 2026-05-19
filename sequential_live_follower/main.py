@@ -63,6 +63,7 @@ class SequentialFollower:
         slide_url: str,
         diag_dir: "Path | None" = None,
         silence_threshold_db_override: "float | None" = None,
+        musical_flatness_threshold_override: "float | None" = None,
     ) -> None:
         logger.info("Initializing SequentialFollower (config=%s)", config_path)
 
@@ -95,8 +96,25 @@ class SequentialFollower:
                 "silence_threshold_db = %.1f dBFS (CLI override; config value was %.1f)",
                 silence_threshold_db, self.config.get_silence_threshold_db(),
             )
+
+        # Spectral-flatness threshold: blocks above this are non-musical
+        # (e.g. coughs, taps, speech) and trigger the same freeze path
+        # the silence gate uses.  CLI override layered the same way for
+        # field tuning during rehearsals.
+        flatness_threshold = (
+            musical_flatness_threshold_override
+            if musical_flatness_threshold_override is not None
+            else self.config.get_musical_flatness_threshold()
+        )
+        if musical_flatness_threshold_override is not None:
+            logger.info(
+                "musical_flatness_threshold = %.2f (CLI override; config value was %.2f)",
+                flatness_threshold, self.config.get_musical_flatness_threshold(),
+            )
+
         self.audio_monitor = AudioLevelMonitor(
             threshold_db=silence_threshold_db,
+            flatness_threshold=flatness_threshold,
             device=self.config.get_mic_device(),
         )
 
@@ -364,15 +382,29 @@ class SequentialFollower:
 
                 raw_beat, raw_conf = matcher.get_latest()
 
-                # Silence gate: pymatchmaker keeps advancing the beat from
-                # its score-prior even when the mic is dead silent.  Force
-                # confidence to 0 in that case so the InertiaEngine cannot
-                # falsely lock in tracking.  When AudioLevelMonitor failed
-                # to open its stream, is_active() falls through to True so
-                # we don't unfairly gate the matcher's own confidence.
+                # Combined musical-content gate: pymatchmaker keeps
+                # advancing the beat from its score-prior on noise just
+                # as readily as on silence (the DTW finds *some* chroma
+                # match for any sustained sound).  We block both cases:
+                #
+                #   silent       : mic_db below the silence threshold
+                #   non_musical  : spectral flatness above the threshold
+                #                  (broadband noise — coughs, taps, paper,
+                #                   speech — rather than tonal content)
+                #
+                # Either condition forces raw_conf to 0 so the
+                # InertiaEngine cannot lock in, and triggers a freeze on
+                # the matcher's DTW position (below) so it cannot drift
+                # forward through the bad audio.  When AudioLevelMonitor
+                # failed to open its stream, both is_active() and
+                # is_musical() fall through to True so we don't unfairly
+                # gate the matcher.
                 mic_available = self.audio_monitor.is_available()
                 mic_level_db = self.audio_monitor.get_level_db()
-                gate_active = mic_available and not self.audio_monitor.is_active()
+                flatness = self.audio_monitor.get_spectral_flatness()
+                silent = not self.audio_monitor.is_active()
+                non_musical = not self.audio_monitor.is_musical()
+                gate_active = mic_available and (silent or non_musical)
                 if gate_active:
                     raw_conf = 0.0
 
@@ -413,6 +445,9 @@ class SequentialFollower:
                         "beat_in_measure": beat_in_measure,
                         "raw_conf": raw_conf,
                         "mic_db": mic_level_db,
+                        "spectral_flatness": flatness,
+                        "is_musical": not non_musical,
+                        "silence_gate_fired": silent,
                         "gate_active": gate_active,
                         "mic_available": mic_available,
                         "matcher_frozen": diag.frozen,
@@ -432,9 +467,10 @@ class SequentialFollower:
                 if self._verbose_sync or now - self._last_state_diag_log >= 1.0:
                     logger.debug(
                         "sync raw_beat=%.2f beat=%.2f measure=%d conf=%.2f "
-                        "mic_db=%.1f gate=%s locked=%s",
+                        "mic_db=%.1f flat=%.3f gate=%s(silent=%s,non_musical=%s) locked=%s",
                         raw_beat, beat, measure, raw_conf,
-                        mic_level_db, gate_active,
+                        mic_level_db, flatness, gate_active,
+                        silent, non_musical,
                         self.inertia.is_locked_in(),
                     )
                     self._last_state_diag_log = now
@@ -610,6 +646,17 @@ def main() -> int:
             "例: --silence-threshold-db -40 で -40 dBFS 以下を無音扱い"
         ),
     )
+    parser.add_argument(
+        "--musical-flatness-threshold",
+        type=float,
+        default=None,
+        help=(
+            "config.json の musical_flatness_threshold を上書きする (0-1)。"
+            "spectral flatness がこの値以上のブロックを「楽音でない」と"
+            "判定して matcher を止める。例: --musical-flatness-threshold 0.30"
+            " で楽音判定を緩く、--musical-flatness-threshold 0.20 で厳しく"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -647,6 +694,7 @@ def main() -> int:
             slide_url=args.slide_url,
             diag_dir=diag_dir,
             silence_threshold_db_override=args.silence_threshold_db,
+            musical_flatness_threshold_override=args.musical_flatness_threshold,
         )
         app.run()
         return 0

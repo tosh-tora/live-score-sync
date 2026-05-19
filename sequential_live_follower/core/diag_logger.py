@@ -54,6 +54,13 @@ FIELDNAMES = [
     "beat_in_measure",
     "raw_conf",
     "mic_db",
+    # Gating signals.  ``gate_active`` is the final OR of the two below
+    # plus the mic-availability check — i.e. the actual condition that
+    # forces raw_conf=0.  ``silence_gate_fired`` and ``is_musical`` are
+    # split out so the CSV makes it obvious *why* the gate engaged.
+    "spectral_flatness",
+    "is_musical",
+    "silence_gate_fired",
     "gate_active",
     "mic_available",
     "matcher_frozen",

@@ -243,13 +243,34 @@ class ConfigLoader:
         pymatchmaker's tendency to keep advancing the beat on silence /
         background noise via its score-driven prior.
 
-        Default is intentionally permissive (-55 dBFS).  In observed WSL2
-        + RDP-audio setups, normal speech registers around -50 dBFS at the
-        mic, so a stricter default (-40 dBFS) ended up gating *all* live
-        audio out and the system never tracked.  Set to a very low number
-        (e.g. -100) to effectively disable the silence gate.
+        Default raised from -55 to **-35 dBFS** after the 2026-05 noise
+        diagnostic logs: ambient WSL2 + RDP-audio noise floor was
+        ~-44 dBFS average, so -55 was 10+ dB below the room floor and
+        the gate effectively never fired.  -35 catches background room
+        noise while still letting normal instrument playback through.
+        Set lower if you find the gate cutting out genuine soft passages.
         """
-        return self.settings.get('silence_threshold_db', -55.0)
+        return self.settings.get('silence_threshold_db', -35.0)
+
+    def get_musical_flatness_threshold(self) -> float:
+        """Get spectral-flatness threshold above which audio is non-musical.
+
+        Spectral flatness ∈ [0, 1]:
+          * tonal (instruments, voice singing): 0.05 - 0.15
+          * broadband noise (room hum, breath, taps): 0.40 - 0.80
+
+        Blocks with flatness ≥ this value are gated identically to
+        "below silence_threshold_db" — the matcher is frozen so it
+        cannot lock onto a non-musical loud sound (cough, tap, speech,
+        paper rustle) that survived the RMS-only silence gate.
+
+        0.25 is a conservative midpoint that catches the typical
+        ambient noise of an empty hall while passing through any
+        plausible instrument timbre.  Raise toward 0.35-0.40 if soft
+        wind or breathy strings are being gated; lower toward 0.20
+        if loud noise still drives advances.
+        """
+        return self.settings.get('musical_flatness_threshold', 0.25)
 
     def get_inertia_timeout_seconds(self) -> float:
         """Get the max seconds inertia extrapolation runs before resetting.
